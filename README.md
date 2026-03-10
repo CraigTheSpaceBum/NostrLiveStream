@@ -2,9 +2,9 @@
 https://craigthespacebum.github.io/NostrLiveStream/
 
 
-# NostrFlux Development Roadmap
+# Nostr Live Development Roadmap
 
-This document outlines the current **bugs, features, and development priorities** for the NostrFlux project.
+This document outlines the current **bugs, features, and development priorities** for the NostrFlux project. Name is pending. Open to suggestions.
 
 The goal is to stabilize the application first, then expand it into a full **Nostr live streaming and social client**.
 
