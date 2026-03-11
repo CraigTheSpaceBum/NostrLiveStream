@@ -229,8 +229,8 @@ nav {
 .stream-card:nth-child(1){animation-delay:.04s}.stream-card:nth-child(2){animation-delay:.08s}.stream-card:nth-child(3){animation-delay:.12s}.stream-card:nth-child(4){animation-delay:.16s}
 
 /* ======== VIDEO PAGE ======== */
-.video-layout{display:grid;grid-template-columns:1fr var(--sidebar-w);height:calc(100vh - 56px);}
-.video-col{overflow-y:auto;display:flex;flex-direction:column;}
+.video-layout{display:grid;grid-template-columns:1fr var(--sidebar-w);height:calc(100vh - 56px);max-width:1920px;margin:0 auto;width:100%;}
+.video-col{overflow-y:auto;display:flex;flex-direction:column;min-width:0;}
 .player-wrap{position:relative;background:#000;width:100%;aspect-ratio:16/9;flex-shrink:0;}
 .player-bg{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:5rem;background:linear-gradient(135deg,#0a1a28,#180600,#080b12);}
 .player-ui{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:flex-end;background:linear-gradient(to top,rgba(0,0,0,.9) 0%,transparent 40%);padding:.8rem .95rem;}
@@ -374,8 +374,8 @@ nav {
 .profile-hero{height:170px;background:linear-gradient(135deg,#0d1e30,#1a0a00,#100015);position:relative;overflow:hidden;border-bottom:1px solid var(--border);z-index:0;}
 .profile-banner-img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.92;display:none;}
 .profile-content{position:relative;z-index:2;padding:0 1.5rem 1.5rem;}
-.profile-top{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(290px,.95fr);gap:1rem;margin:-34px 0 .95rem;align-items:start;}
-.profile-left-stack{display:grid;grid-template-rows:auto minmax(170px,1fr);gap:.85rem;min-width:0;}
+.profile-top{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(290px,.95fr);gap:1rem;margin:-34px 0 .95rem;align-items:stretch;}
+.profile-left-stack{display:flex;flex-direction:column;gap:.85rem;min-width:0;}
 .profile-head-row{display:flex;align-items:flex-start;gap:.78rem;min-width:0;}
 .profile-av-wrap{margin-top:-14px;display:inline-flex;position:relative;z-index:4;flex-shrink:0;}
 .profile-av-big{width:98px;height:98px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--zap));display:flex;align-items:center;justify-content:center;font-size:2.45rem;border:3px solid var(--bg);transition:box-shadow .18s,border-color .18s;}
@@ -399,7 +399,7 @@ nav {
 .profile-name{font-family:'Syne',sans-serif;font-weight:800;font-size:1.3rem;line-height:1.2;}
 .profile-nip05{font-family:'DM Mono',monospace;font-size:.74rem;color:var(--nip05);display:flex;align-items:center;gap:.3rem;margin-top:.18rem;}
 .profile-npub{font-family:'DM Mono',monospace;font-size:.7rem;color:var(--muted);margin-top:.2rem;word-break:break-all;}
-.profile-bio-box{padding:.72rem .82rem;height:100%;display:flex;flex-direction:column;}
+.profile-bio-box{padding:.72rem .82rem;flex:1;display:flex;flex-direction:column;}
 .profile-bio{font-size:.85rem;color:var(--text2);line-height:1.6;margin:0;max-width:none;white-space:pre-wrap;word-break:break-word;}
 .profile-bio.clamped{display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden;}
 .profile-show-more{margin-top:.46rem;background:transparent;border:1px solid var(--border2);border-radius:8px;color:var(--text2);font-size:.7rem;padding:.25rem .55rem;cursor:pointer;align-self:flex-start;}
@@ -409,12 +409,12 @@ nav {
 .profile-bio-meta .lbl{font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted);}
 .profile-bio-meta .val{font-family:'DM Mono',monospace;font-size:.66rem;color:var(--text);word-break:break-all;}
 .profile-bio-meta a{color:var(--accent);text-decoration:none;word-break:break-all;}
-.profile-since{margin-top:auto;padding-top:.58rem;font-family:'DM Mono',monospace;font-size:.66rem;color:var(--muted);}
-.profile-right-stack{display:grid;grid-template-rows:auto minmax(170px,1fr);gap:.85rem;align-items:stretch;}
-.profile-action-box{padding:.56rem .64rem;margin-top:10px;justify-self:end;width:max-content;max-width:100%;}
+.profile-since{display:none;}
+.profile-right-stack{display:flex;flex-direction:column;gap:.85rem;align-items:stretch;}
+.profile-action-box{padding:.56rem .64rem;align-self:flex-end;width:max-content;max-width:100%;}
 .profile-actions-row{display:flex;align-items:center;justify-content:flex-end;gap:.38rem;flex-wrap:wrap;}
-.profile-inline-meta{display:grid;gap:.5rem;max-width:none;margin-top:0;padding:.64rem .68rem;height:100%;align-content:start;}
-.profile-inline-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.42rem;margin-top:.2rem;}
+.profile-inline-meta{display:flex;flex-direction:column;gap:.5rem;max-width:none;padding:.64rem .68rem;flex:1;}
+.profile-inline-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.38rem;margin-top:.2rem;}
 .pis{padding:.42rem .45rem;border:1px solid var(--border);border-radius:8px;background:var(--surface2);}
 .pis .iv{font-family:'DM Mono',monospace;font-weight:600;font-size:.86rem;color:var(--text);}
 .pis .il{font-size:.67rem;color:var(--muted);margin-top:.14rem;}
@@ -435,12 +435,14 @@ nav {
 .profile-feed-name{font-weight:700;color:var(--text);font-size:.78rem;line-height:1.2;}
 .profile-feed-time{font-family:'DM Mono',monospace;font-size:.64rem;color:var(--muted);white-space:nowrap;margin-top:.08rem;}
 .profile-feed-text{font-size:.82rem;color:var(--text2);line-height:1.55;white-space:pre-wrap;word-break:break-word;}
-.profile-feed-media{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.45rem;margin-top:.56rem;}
+/* Post media grid: photos square 3-col, videos 16:9 full-width */
+.profile-feed-media{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.4rem;margin-top:.56rem;}
 .profile-feed-media.one{grid-template-columns:1fr;}
-.profile-feed-photo,.profile-feed-video{border-radius:10px;overflow:hidden;border:1px solid var(--border2);background:#090d12;display:flex;align-items:center;justify-content:center;min-height:120px;}
+.profile-feed-photo{border-radius:8px;overflow:hidden;border:1px solid var(--border2);background:#090d12;aspect-ratio:1/1;}
 .profile-feed-photo img{width:100%;height:100%;object-fit:cover;display:block;}
-.profile-feed-video video{width:100%;height:100%;max-height:320px;object-fit:cover;display:block;background:#000;}
-.profile-feed-video a{color:var(--zap);font-size:.74rem;text-decoration:none;font-weight:600;}
+.profile-feed-video{border-radius:8px;overflow:hidden;border:1px solid var(--border2);background:#090d12;grid-column:1/-1;aspect-ratio:16/9;}
+.profile-feed-video video{width:100%;height:100%;object-fit:contain;display:block;background:#000;}
+.profile-feed-video a{display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:var(--zap);font-size:.74rem;text-decoration:none;font-weight:600;padding:.75rem;}
 .profile-feed-stats{display:flex;flex-wrap:wrap;gap:.44rem;margin-top:.55rem;}
 .pfs{padding:.17rem .42rem;border:1px solid var(--border);border-radius:999px;background:rgba(255,255,255,.02);font-size:.66rem;color:var(--text2);font-family:'DM Mono',monospace;}
 .pfs strong{color:var(--text);font-weight:600;}
@@ -471,18 +473,33 @@ nav {
 .profile-stream-item{display:flex;align-items:center;justify-content:space-between;gap:.6rem;padding:.58rem .62rem;background:var(--surface2);border:1px solid var(--border);border-radius:9px;}
 .profile-stream-title{font-size:.8rem;color:var(--text);font-weight:600;line-height:1.4;}
 .profile-stream-meta{font-family:'DM Mono',monospace;font-size:.66rem;color:var(--muted);margin-top:.22rem;}
-.profile-video-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.58rem;}
-.profile-video-card{background:var(--surface2);border:1px solid var(--border);border-radius:10px;overflow:hidden;}
-.profile-video-frame{aspect-ratio:9/16;background:#000;display:flex;align-items:center;justify-content:center;overflow:hidden;}
+/* Media tab videos: 3-col landscape 16:9 - half the size of old portrait layout */
+.profile-video-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.45rem;}
+.profile-video-card{background:var(--surface2);border:1px solid var(--border);border-radius:8px;overflow:hidden;}
+.profile-video-frame{aspect-ratio:16/9;background:#000;display:flex;align-items:center;justify-content:center;overflow:hidden;}
 .profile-video-frame video{width:100%;height:100%;object-fit:cover;display:block;background:#000;}
-.profile-video-fallback{font-size:.72rem;color:var(--text2);padding:.72rem;text-align:center;}
-.profile-video-meta{padding:.45rem .5rem;}
-.profile-video-caption{font-size:.74rem;color:var(--text2);line-height:1.45;max-height:3.1em;overflow:hidden;}
-.profile-video-time{font-family:'DM Mono',monospace;font-size:.64rem;color:var(--muted);margin-top:.24rem;}
+.profile-video-fallback{font-size:.68rem;color:var(--text2);padding:.5rem;text-align:center;}
+.profile-video-meta{padding:.3rem .4rem;}
+.profile-video-caption{font-size:.68rem;color:var(--text2);line-height:1.4;max-height:2.8em;overflow:hidden;}
+.profile-video-time{font-family:'DM Mono',monospace;font-size:.6rem;color:var(--muted);margin-top:.18rem;}
 .profile-photo-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.5rem;}
-.profile-photo-card{position:relative;border-radius:10px;overflow:hidden;border:1px solid var(--border);background:#0b0f14;aspect-ratio:1/1;}
+.profile-photo-card{position:relative;border-radius:8px;overflow:hidden;border:1px solid var(--border);background:#0b0f14;aspect-ratio:1/1;}
 .profile-photo-card img{width:100%;height:100%;object-fit:cover;display:block;}
-.profile-photo-cap{position:absolute;left:0;right:0;bottom:0;background:linear-gradient(to top,rgba(0,0,0,.65),rgba(0,0,0,0));color:#d8e1ea;font-size:.64rem;padding:.5rem .45rem .35rem;line-height:1.4;max-height:3.6em;overflow:hidden;}
+.profile-photo-cap{position:absolute;left:0;right:0;bottom:0;background:linear-gradient(to top,rgba(0,0,0,.65),rgba(0,0,0,0));color:#d8e1ea;font-size:.62rem;padding:.4rem .38rem .28rem;line-height:1.4;max-height:3em;overflow:hidden;}
+/* Profile compose box */
+.profile-compose-box{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:.85rem;}
+.profile-compose-box.hidden{display:none;}
+.profile-compose-header{display:flex;align-items:center;gap:.55rem;margin-bottom:.6rem;}
+.profile-compose-av{width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--zap));display:flex;align-items:center;justify-content:center;font-size:.88rem;overflow:hidden;flex-shrink:0;border:2px solid var(--border2);}
+.profile-compose-label{font-family:'Syne',sans-serif;font-weight:700;font-size:.85rem;}
+.profile-compose-textarea{width:100%;min-height:80px;max-height:200px;background:#0a1018;border:1px solid var(--border2);border-radius:10px;padding:.55rem .72rem;color:var(--text);font-family:'DM Sans',sans-serif;font-size:.84rem;outline:none;resize:vertical;line-height:1.5;transition:border-color .15s;}
+.profile-compose-textarea:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(232,70,10,.15);}
+.profile-compose-textarea::placeholder{color:var(--muted);}
+.profile-compose-footer{display:flex;align-items:center;justify-content:flex-end;gap:.5rem;margin-top:.5rem;}
+.profile-compose-chars{font-family:'DM Mono',monospace;font-size:.66rem;color:var(--muted);margin-right:auto;}
+.profile-compose-btn{padding:.38rem .95rem;background:var(--accent);border:none;border-radius:8px;cursor:pointer;color:#fff;font-size:.8rem;font-weight:600;font-family:'DM Sans',sans-serif;transition:all .15s;}
+.profile-compose-btn:hover{background:#ff5520;}
+.profile-compose-btn:disabled{opacity:.5;cursor:not-allowed;}
 .pmeta-row{display:flex;align-items:flex-start;justify-content:space-between;gap:.55rem;font-size:.76rem;color:var(--text2);}
 .pmeta-row span:first-child{font-family:'DM Mono',monospace;color:var(--muted);}
 .pmeta-row code{font-family:'DM Mono',monospace;color:var(--text);font-size:.68rem;word-break:break-all;}
@@ -1441,10 +1458,10 @@ footer p{font-size:.72rem;color:var(--muted);}
           </div>
           <!-- Actions: Zap, Follow, Share, Like, Report -->
           <div class="sib-actions-row">
-            <button class="btn btn-zap" style="padding:.36rem .8rem;font-size:.79rem;">⚡ Zap</button>
+            <button class="btn btn-zap" id="theaterZapBtn" style="padding:.36rem .8rem;font-size:.79rem;" onclick="theaterZap()">⚡ Zap</button>
             <button class="btn btn-follow" id="theaterFollowBtn" style="padding:.36rem .8rem;font-size:.79rem;" onclick="toggleTheaterFollow()">+ Follow</button>
-            <button class="action-btn share-btn">Share</button>
-            <button class="action-btn like-btn" id="likeBtn"> <span id="likeCount">0</span></button>
+            <button class="action-btn share-btn" onclick="shareStream()">Share</button>
+            <button class="action-btn like-btn" id="likeBtn" onclick="toggleLike()">❤ <span id="likeCount">0</span></button>
             <button class="action-btn report-btn" title="Report stream">⚑</button>
           </div>
         </div>
@@ -1468,9 +1485,7 @@ footer p{font-size:.72rem;color:var(--muted);}
       <!-- Recommended -->
       <div class="reco">
         <div class="reco-title">Also Live Now</div>
-        <div class="reco-item"><div class="reco-thumb"><div class="tc t2" style="height:100%;display:flex;align-items:center;justify-content:center;font-size:1.3rem;"></div></div><div class="reco-text"><div class="rt">Building P2P Relay in Rust</div><div class="rs">fiatjaf - <span style="color:var(--live)">1.2k live</span></div></div></div>
-        <div class="reco-item"><div class="reco-thumb"><div class="tc t3" style="height:100%;display:flex;align-items:center;justify-content:center;font-size:1.3rem;"></div></div><div class="reco-text"><div class="rt">Bitcoin AMA - Lightning Deep Dive</div><div class="rs">jack - <span style="color:var(--live)">892 live</span></div></div></div>
-        <div class="reco-item"><div class="reco-thumb"><div class="tc t4" style="height:100%;display:flex;align-items:center;justify-content:center;font-size:1.3rem;"></div></div><div class="reco-text"><div class="rt">Sovereign Tech Talk Podcast Ep.44</div><div class="rs">stacksats - <span style="color:var(--purple)">Soon</span></div></div></div>
+        <div id="recoList"></div>
       </div>
     </div>
 
@@ -1478,7 +1493,6 @@ footer p{font-size:.72rem;color:var(--muted);}
     <div class="stream-sidebar">
       <div class="stabs">
         <div class="stab active" onclick="switchTab('chat')">Live Chat</div>
-        <div class="stab" onclick="switchTab('viewers')">Viewers <span style="font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted)">2.1k</span></div>
       </div>
       <div class="chat-scroll" id="chatScroll">
         <div class="cmsg"><div class="c-av" onclick="showProfile('fiatjaf','','npub1zl3...gz4','fiatjaf@nostr.com')"></div><div class="c-body"><div class="c-name-row"><span class="c-name co" onclick="showProfile('fiatjaf','','npub1zl3...gz4','fiatjaf@nostr.com')">fiatjaf</span><span class="c-nip05" title="fiatjaf@nostr.com"></span></div><div class="c-text">incredible session wavesound </div></div><div class="chat-msg-actions"><button class="cma-btn" title="Reply"></button><button class="cma-btn like-cma" title="Like"></button><button class="cma-btn zap-cma" title="Zap"></button><button class="cma-btn" title="Share"></button></div></div>
@@ -1503,9 +1517,8 @@ footer p{font-size:.72rem;color:var(--muted);}
           <textarea class="chat-inp" placeholder="Send a message..." rows="2"></textarea>
         </div>
         <div class="chat-acts">
-          <button class="ca-btn zap-ca">Zap</button>
+          <button class="ca-btn zap-ca" onclick="theaterZap()">⚡ Zap</button>
           <button class="ca-btn" id="emojiBtn" onclick="toggleEmoji(event)">Emoji</button>
-          <button class="ca-btn" onclick="openSettings()">Settings</button>
           <button class="chat-send-btn">Send</button>
           <div class="emoji-picker" id="emojiPicker"><div class="ep-grid" id="epGrid"></div></div>
         </div>
@@ -1543,7 +1556,7 @@ footer p{font-size:.72rem;color:var(--muted);}
             <div class="profile-bio-meta" id="profTwitterRow" style="display:none;"><span class="lbl">Twitter</span><a id="profTwitterBio" href="#" target="_blank" rel="noopener noreferrer"></a></div>
             <div class="profile-bio-meta" id="profGithubRow" style="display:none;"><span class="lbl">GitHub</span><a id="profGithubBio" href="#" target="_blank" rel="noopener noreferrer"></a></div>
           </div>
-          <div class="profile-since" id="profNostrSince">On Nostr for -</div>
+          <div class="profile-since" id="profNostrSince" style="display:none"></div>
         </div>
       </div>
 
@@ -1563,8 +1576,10 @@ footer p{font-size:.72rem;color:var(--muted);}
           <div class="profile-inline-stats">
             <div class="pis"><div class="iv" id="profFollowers">0</div><div class="il">Followers</div></div>
             <div class="pis"><div class="iv" id="profFollowing">0</div><div class="il">Following</div></div>
-            <div class="pis"><div class="iv" id="profStreams">0</div><div class="il">Streams</div></div>
-            <div class="pis"><div class="iv" id="profSats">SATS 0</div><div class="il">Sats Received</div></div>
+            <div class="pis"><div class="iv" id="profPostCount">0</div><div class="il">Post Count</div></div>
+            <div class="pis"><div class="iv" id="profStreams">0</div><div class="il">Stream Count</div></div>
+            <div class="pis"><div class="iv" id="profNostrAgeStat">-</div><div class="il">Time on Nostr</div></div>
+            <div class="pis"><div class="iv" id="profSats">0</div><div class="il">Total Sats Received</div></div>
           </div>
         </div>
       </div>
@@ -1572,6 +1587,20 @@ footer p{font-size:.72rem;color:var(--muted);}
 
     <div class="profile-main-grid">
       <div class="profile-col">
+
+        <!-- Compose box: only shown on own profile -->
+        <div class="profile-compose-box hidden" id="profileComposeBox">
+          <div class="profile-compose-header">
+            <div class="profile-compose-av" id="profileComposeAv">U</div>
+            <span class="profile-compose-label">Share a note</span>
+          </div>
+          <textarea class="profile-compose-textarea" id="profileComposeText" placeholder="What's on your mind?" maxlength="4096" oninput="profileComposeInput(this)"></textarea>
+          <div class="profile-compose-footer">
+            <span class="profile-compose-chars" id="profileComposeChars">4096</span>
+            <button class="profile-compose-btn" id="profileComposeBtn" onclick="publishProfileNote()">Post Note</button>
+          </div>
+        </div>
+
         <div class="profile-card" id="profileLiveWrap" style="display:none;">
           <div class="profile-sec-head">
             <h3>Live Now</h3>
@@ -1599,8 +1628,7 @@ footer p{font-size:.72rem;color:var(--muted);}
           <div class="profile-tab-row">
             <button class="profile-tab" id="profileTabBtnPosts" onclick="switchProfileTab('posts')" style="display:none;">Posts</button>
             <button class="profile-tab active" id="profileTabBtnStreams" onclick="switchProfileTab('streams')">Past Streams</button>
-            <button class="profile-tab" id="profileTabBtnVideos" onclick="switchProfileTab('videos')">Videos</button>
-            <button class="profile-tab" id="profileTabBtnPhotos" onclick="switchProfileTab('photos')">Photos</button>
+            <button class="profile-tab" id="profileTabBtnMedia" onclick="switchProfileTab('media')">Media</button>
           </div>
 
           <div class="profile-tab-pane" id="profileTabPosts">
@@ -1613,15 +1641,9 @@ footer p{font-size:.72rem;color:var(--muted);}
               <div class="profile-feed-empty">Loading stream history...</div>
             </div>
           </div>
-          <div class="profile-tab-pane" id="profileTabVideos">
-            <div id="profileVideosList" class="profile-video-grid">
-              <div class="profile-feed-empty">Loading videos...</div>
-            </div>
-          </div>
-          <div class="profile-tab-pane" id="profileTabPhotos">
-            <div id="profilePhotosList" class="profile-photo-grid">
-              <div class="profile-feed-empty">Loading photos...</div>
-            </div>
+          <div class="profile-tab-pane" id="profileTabMedia">
+            <div id="profileVideosList" class="profile-video-grid" style="margin-bottom:.75rem;"></div>
+            <div id="profilePhotosList" class="profile-photo-grid"></div>
           </div>
         </div>
       </div>

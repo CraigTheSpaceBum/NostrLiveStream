@@ -87,7 +87,8 @@
     GRID_PAGE_SIZE: 20,
     scriptPromises: {},
     streamZapTotals: new Map(),
-    _theaterRuntimeInterval: null
+    _theaterRuntimeInterval: null,
+    likedStreamAddresses: new Set()   // tracks which streams the user has liked
   };
 
   class RelayPool {
@@ -1709,10 +1710,11 @@
       state._theaterRuntimeInterval = setInterval(updateRuntime, 1000);
     }
 
-    // Like button — reset state for new stream
+    // Like button — reflect per-stream like state
     const likeBtn = qs('#likeBtn');
     const likeCount = qs('#likeCount');
-    if (likeBtn) likeBtn.classList.remove('liked');
+    const isLiked = state.likedStreamAddresses.has(stream.address);
+    if (likeBtn) likeBtn.classList.toggle('liked', isLiked);
     if (likeCount) likeCount.textContent = '0';
 
     // Follow button — reflect current follow state
@@ -1868,12 +1870,20 @@
 
   function subscribeLive() {
     if (state.liveSubId) state.pool.unsubscribe(state.liveSubId);
+
+    let liveGridTimer = null;
+    const debouncedRenderGrid = () => {
+      clearTimeout(liveGridTimer);
+      liveGridTimer = setTimeout(renderLiveGrid, 300);
+    };
+
     state.liveSubId = state.pool.subscribe(
       [{ kinds: [KIND_LIVE_EVENT], limit: 200, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 7 }],
       {
         event: (ev) => {
           const stream = parseLiveEvent(ev);
           upsertStream(stream);
+          debouncedRenderGrid();
         },
         eose: () => {
           renderLiveGrid();
@@ -1893,6 +1903,7 @@
     const sc = qs('#chatScroll');
     if (sc) sc.innerHTML = '';
 
+    const seenIds = new Set();
     const filters = [{
       kinds: [KIND_LIVE_CHAT],
       '#a': [stream.address],
@@ -1901,7 +1912,12 @@
     }];
 
     state.chatSubId = state.pool.subscribe(filters, {
-      event: (ev) => renderChatMessage(ev)
+      event: (ev) => {
+        if (!ev || !ev.id) return;
+        if (seenIds.has(ev.id)) return;
+        seenIds.add(ev.id);
+        renderChatMessage(ev);
+      }
     });
   }
 
@@ -2121,47 +2137,50 @@
   function renderPostMedia(container, mediaItems) {
     if (!container || !mediaItems.length) return;
     container.classList.add('profile-feed-media');
-    if (mediaItems.length === 1) container.classList.add('one');
 
-    mediaItems.slice(0, 4).forEach((m) => {
-      if (m.kind === 'photo') {
-        const link = document.createElement('a');
-        link.className = 'profile-feed-photo';
-        link.href = m.url;
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
+    const photos = mediaItems.filter((m) => m.kind === 'photo');
+    const videos = mediaItems.filter((m) => m.kind === 'video');
 
-        const img = document.createElement('img');
-        img.src = m.url;
-        img.alt = 'Post image';
-        img.loading = 'lazy';
-        link.appendChild(img);
-        container.appendChild(link);
-        return;
+    // Single photo: span full width; multiple: 3-col square grid (CSS handles it)
+    if (photos.length === 1 && videos.length === 0) container.classList.add('one');
+
+    // Photos — square aspect-ratio 1:1 via CSS .profile-feed-photo
+    photos.slice(0, 6).forEach((m) => {
+      const link = document.createElement('a');
+      link.className = 'profile-feed-photo';
+      link.href = m.url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      const img = document.createElement('img');
+      img.src = m.url;
+      img.alt = 'Post image';
+      img.loading = 'lazy';
+      link.appendChild(img);
+      container.appendChild(link);
+    });
+
+    // Videos — 16:9 YouTube-style, spans full grid row via CSS grid-column:1/-1
+    videos.slice(0, 2).forEach((m) => {
+      const frame = document.createElement('div');
+      frame.className = 'profile-feed-video';
+      if (/\.m3u8($|\?)/i.test(m.url)) {
+        const a = document.createElement('a');
+        a.href = m.url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.textContent = '▶ Open HLS stream';
+        frame.appendChild(a);
+      } else {
+        const v = document.createElement('video');
+        v.src = m.url;
+        v.controls = true;
+        v.playsInline = true;
+        v.muted = true;
+        v.autoplay = false;
+        v.preload = 'metadata';
+        frame.appendChild(v);
       }
-
-      if (m.kind === 'video') {
-        const frame = document.createElement('div');
-        frame.className = 'profile-feed-video';
-
-        if (/\.m3u8($|\?)/i.test(m.url)) {
-          const a = document.createElement('a');
-          a.href = m.url;
-          a.target = '_blank';
-          a.rel = 'noopener noreferrer';
-          a.textContent = 'Open HLS video';
-          frame.appendChild(a);
-        } else {
-          const v = document.createElement('video');
-          v.src = m.url;
-          v.controls = true;
-          v.playsInline = true;
-          v.preload = 'metadata';
-          frame.appendChild(v);
-        }
-
-        container.appendChild(frame);
-      }
+      container.appendChild(frame);
     });
   }
   function renderProfileFeedInto(listEl, notes, profile, pubkey, aggregates) {
@@ -2464,17 +2483,13 @@
         const video = document.createElement('video');
         video.src = item.url;
         video.controls = true;
-        video.autoplay = true;
-        video.loop = true;
-        video.muted = false;
-        video.defaultMuted = false;
+        video.autoplay = false;
+        video.loop = false;
+        video.muted = true;
+        video.defaultMuted = true;
         video.playsInline = true;
         video.preload = 'metadata';
         frame.appendChild(video);
-        video.play().catch(() => {
-          video.muted = true;
-          video.play().catch(() => {});
-        });
       }
 
       const meta = document.createElement('div');
@@ -2537,17 +2552,15 @@
     const tabMap = {
       posts: 'Posts',
       streams: 'Streams',
-      videos: 'Videos',
-      photos: 'Photos'
+      media: 'Media'
     };
-
     const postsBtn = qs('#profileTabBtnPosts');
     const postsAllowed = !!(postsBtn && postsBtn.style.display !== 'none');
-
-    let tab = Object.prototype.hasOwnProperty.call(tabMap, tabName) ? tabName : 'streams';
+    let tab = tabName;
+    if (tab === 'videos' || tab === 'photos') tab = 'media';
+    if (!Object.prototype.hasOwnProperty.call(tabMap, tab)) tab = 'streams';
     if (tab === 'posts' && !postsAllowed) tab = 'streams';
     state.profileTab = tab;
-
     Object.keys(tabMap).forEach((key) => {
       const btn = qs(`#profileTabBtn${tabMap[key]}`);
       if (btn) btn.classList.toggle('active', key === tab);
@@ -2781,18 +2794,33 @@
     const userStreams = Array.from(state.streamsByAddress.values()).filter((s) => s.pubkey === pubkey);
     const sinceEl = qs('#profNostrSince');
     const firstSeenTs = estimateProfileFirstSeen(pubkey, p);
-    if (sinceEl) sinceEl.textContent = firstSeenTs ? ('On Nostr for ' + formatNostrAge(firstSeenTs)) : 'On Nostr for -';
+    if (sinceEl) sinceEl.textContent = ''; // hidden via CSS; kept for Time on Nostr stat tile
 
     const followers = qs('#profFollowers');
     const following = qs('#profFollowing');
     const streams = qs('#profStreams');
     const sats = qs('#profSats');
+    const postCountEl = qs('#profPostCount');
+    const nostrAgeStatEl = qs('#profNostrAgeStat');
     const stats = state.profileStatsByPubkey.get(pubkey) || { followers: 0, following: 0 };
 
     if (followers) followers.textContent = formatCount(stats.followers || 0);
     if (following) following.textContent = formatCount(stats.following || 0);
+    const noteMap = state.profileNotesByPubkey.get(pubkey) || new Map();
+    const noteCount = Array.from(noteMap.values()).filter((ev) => ev.pubkey === pubkey && ev.kind === 1).length;
+    if (postCountEl) postCountEl.textContent = formatCount(noteCount);
     if (streams) streams.textContent = `${userStreams.length}`;
-    if (sats) sats.textContent = `SATS ${formatCount(userStreams.length * 2100)}`;
+    if (nostrAgeStatEl) nostrAgeStatEl.textContent = firstSeenTs ? formatNostrAge(firstSeenTs) : '-';
+    if (sats) sats.textContent = formatCount(userStreams.length * 2100);
+
+    // Show compose box only on own profile
+    const composeBox = qs('#profileComposeBox');
+    const composeAv = qs('#profileComposeAv');
+    const isOwnProfile = !!(state.user && state.user.pubkey === pubkey);
+    if (composeBox) composeBox.classList.toggle('hidden', !isOwnProfile);
+    if (isOwnProfile && composeAv) {
+      setAvatarEl(composeAv, p.picture || '', pickAvatar(pubkey));
+    }
 
     const liveWrap = qs('#profileLiveWrap');
     const liveStatus = qs('#profLiveStatus');
@@ -3266,8 +3294,7 @@
     ];
 
     try {
-      const ev = await signAndPublish(KIND_LIVE_CHAT, text, tags);
-      renderChatMessage(ev);
+      await signAndPublish(KIND_LIVE_CHAT, text, tags);
       input.value = '';
     } catch (err) {
       alert(err.message || 'Failed to send chat message.');
@@ -3277,28 +3304,29 @@
   async function sendReaction() {
     const stream = state.streamsByAddress.get(state.selectedStreamAddress);
     if (!stream) return;
-    if (!state.user) {
-      window.openLogin();
-      return;
-    }
+    if (!state.user) { window.openLogin(); return; }
 
-    const tags = [
-      ['e', stream.id],
-      ['p', stream.pubkey],
-      ['a', stream.address]
-    ];
+    const likeBtn = qs('#likeBtn');
+    const likeCount = qs('#likeCount');
+    const alreadyLiked = state.likedStreamAddresses.has(stream.address);
 
-    try {
-      await signAndPublish(KIND_REACTION, '+', tags);
-      const count = qs('#likeCount');
-      if (count) {
-        const n = Number(count.textContent || '0') || 0;
-        count.textContent = `${n + 1}`;
-      }
-      const likeBtn = qs('#likeBtn');
+    if (alreadyLiked) {
+      state.likedStreamAddresses.delete(stream.address);
+      if (likeCount) likeCount.textContent = `${Math.max(0, (Number(likeCount.textContent) || 0) - 1)}`;
+      if (likeBtn) likeBtn.classList.remove('liked');
+      try { await signAndPublish(KIND_REACTION, '-', [['e', stream.id], ['p', stream.pubkey], ['a', stream.address]]); } catch (_) {}
+    } else {
+      state.likedStreamAddresses.add(stream.address);
+      if (likeCount) likeCount.textContent = `${(Number(likeCount.textContent) || 0) + 1}`;
       if (likeBtn) likeBtn.classList.add('liked');
-    } catch (err) {
-      alert(err.message || 'Failed to react.');
+      try {
+        await signAndPublish(KIND_REACTION, '+', [['e', stream.id], ['p', stream.pubkey], ['a', stream.address]]);
+      } catch (err) {
+        state.likedStreamAddresses.delete(stream.address);
+        if (likeCount) likeCount.textContent = `${Math.max(0, (Number(likeCount.textContent) || 0) - 1)}`;
+        if (likeBtn) likeBtn.classList.remove('liked');
+        alert(err.message || 'Failed to react.');
+      }
     }
   }
 
@@ -3324,12 +3352,6 @@
         }
       });
     }
-
-    const likeBtn = qs('#likeBtn');
-    if (likeBtn) likeBtn.addEventListener('click', (e) => {
-      e.preventDefault();
-      sendReaction();
-    });
 
     qsa('.srow .sc').forEach((c) => {
       c.addEventListener('click', () => {
@@ -3429,18 +3451,12 @@
       if (home) home.classList.toggle('active', p === 'home');
       if (video) video.style.display = 'none';
       if (profile) profile.style.display = 'none';
-      // Going home: stop theater + profile, let hero resume
+      // Stop all other audio. On home: fully restart the hero cycle so no stale timer fires.
       stopAllAudio('hero');
-      // Restart hero if it was stopped and streams are available
-      if (p === 'home' && !state.featuredCycleTimer) startHeroCycle();
-      else if (p === 'home') {
-        // Re-attach hero video if it was paused out
+      if (p === 'home') {
+        stopHeroCycle(); // clear any stale timer first
         const streams = heroFeaturedStreams();
-        if (streams.length) {
-          const idx = ((state.featuredIndex % streams.length) + streams.length) % streams.length;
-          const token = state.heroPlaybackToken;
-          renderHeroPlayer(streams[idx], token);
-        }
+        if (streams.length) startHeroCycle();
       }
       if (state.settings.miniPlayer && state.selectedStreamAddress) window.showMini();
       else window.hideMini();
@@ -3454,8 +3470,10 @@
       if (home) home.classList.remove('active');
       if (video) video.style.display = 'block';
       if (profile) profile.style.display = 'none';
-      // Going to theater: stop hero + profile audio
+      // Kill the hero cycle timer completely — prevents it firing and starting audio behind theater
+      stopHeroCycle();
       stopAllAudio('theater');
+      if (window.renderRecoStreams) window.renderRecoStreams(); // populate "Also Live Now"
       if (state.settings.miniPlayer && state.selectedStreamAddress) window.showMini();
       else window.hideMini();
       window.scrollTo(0, 0);
@@ -3468,7 +3486,8 @@
       if (home) home.classList.remove('active');
       if (video) video.style.display = 'none';
       if (profile) profile.style.display = 'block';
-      // Going to profile: stop hero + theater audio
+      // Kill the hero cycle timer completely — prevents audio starting behind profile
+      stopHeroCycle();
       stopAllAudio('profile');
 
       setAvatarEl(qs('#profAv'), '', av || 'U');
@@ -3548,7 +3567,7 @@
         const bioToggle = qs('#profBioToggle');
         if (bioToggle) bioToggle.style.display = 'none';
         const nostrSince = qs('#profNostrSince');
-        if (nostrSince) nostrSince.textContent = 'On Nostr for -';
+        if (nostrSince) nostrSince.textContent = '';
 
         setProfileTab(state.profileTab || 'streams');
       }
@@ -3764,15 +3783,6 @@
       }
     };
 
-    window.signOut = function () {
-      state.user = null;
-      state.authMode = 'readonly';
-      state.localSecretKey = null;
-      state.pendingOnboardingNsec = '';
-      localStorage.removeItem(LOCAL_NSEC_STORAGE_KEY);
-      setUserUi();
-    };
-
     window.openSettings = function () {
       populateSettingsModal();
       qs('#settingsModal').classList.add('open');
@@ -3868,10 +3878,136 @@
       const stream = state.streamsByAddress.get(state.selectedStreamAddress);
       if (!stream) return;
       if (!state.user) { window.openLogin(); return; }
-      // Re-use the profile follow toggle
       state.selectedProfilePubkey = stream.pubkey;
       toggleFollowSelectedProfile();
       updateTheaterFollowBtn(stream.pubkey);
+    };
+
+    // ---- "Also Live Now" reco panel ----
+    window.renderRecoStreams = function () {
+      const list = qs('#recoList');
+      if (!list) return;
+      const current = state.selectedStreamAddress;
+      const thumbClasses = ['t1','t2','t3','t4','t5','t6','t7','t8'];
+      const others = sortedLiveStreams()
+        .filter((s) => s.address !== current && s.status === 'live')
+        .slice(0, 6);
+      list.innerHTML = '';
+      if (!others.length) {
+        list.innerHTML = '<div style="font-size:.74rem;color:var(--muted);padding:.25rem .45rem;">No other live streams right now.</div>';
+        return;
+      }
+      others.forEach((s, i) => {
+        const p = profileFor(s.pubkey);
+        const item = document.createElement('div');
+        item.className = 'reco-item';
+        item.innerHTML = `
+          <div class="reco-thumb"><div class="tc ${thumbClasses[i % thumbClasses.length]}" style="height:100%;display:flex;align-items:center;justify-content:center;font-size:1.2rem;"></div></div>
+          <div class="reco-text"><div class="rt"></div><div class="rs"></div></div>`;
+        qs('.rt', item).textContent = s.title || 'Untitled stream';
+        qs('.rs', item).innerHTML = `${p.name || shortHex(s.pubkey)} — <span style="color:var(--live)">${s.participants ? s.participants.toLocaleString() + ' live' : 'live'}</span>`;
+        if (s.image) {
+          const thumb = qs('.reco-thumb', item);
+          thumb.innerHTML = `<img src="${s.image}" style="width:100%;height:100%;object-fit:cover;" loading="lazy">`;
+        }
+        item.addEventListener('click', () => openStream(s.address));
+        list.appendChild(item);
+      });
+    };
+
+    // ---- Compose / post note on own profile ----
+    window.profileComposeInput = function (el) {
+      const max = 4096;
+      const rem = max - (el.value || '').length;
+      const chars = qs('#profileComposeChars');
+      if (chars) {
+        chars.textContent = `${rem}`;
+        chars.style.color = rem < 50 ? 'var(--live)' : '';
+      }
+    };
+
+    window.publishProfileNote = async function () {
+      if (!state.user) { window.openLogin(); return; }
+      const textarea = qs('#profileComposeText');
+      const btn = qs('#profileComposeBtn');
+      const text = (textarea && textarea.value || '').trim();
+      if (!text) return;
+
+      if (btn) { btn.disabled = true; btn.textContent = 'Posting…'; }
+      try {
+        await signAndPublish(1, text, []);
+        if (textarea) textarea.value = '';
+        window.profileComposeInput(textarea || { value: '' });
+        // Refresh feed
+        if (state.selectedProfilePubkey) {
+          subscribeProfileFeed(state.selectedProfilePubkey);
+        }
+      } catch (err) {
+        alert(err.message || 'Failed to post note.');
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Post Note'; }
+      }
+    };
+
+    // ---- Theater Zap ----
+    window.theaterZap = async function () {
+      const stream = state.streamsByAddress.get(state.selectedStreamAddress);
+      if (!stream) return;
+      if (!state.user) { window.openLogin(); return; }
+      const p = profileFor(stream.pubkey);
+      const lud16 = (p.lud16 || '').trim();
+      if (!lud16) { alert('This streamer has no Lightning address (lud16) set on their Nostr profile.'); return; }
+      if (window.webln) {
+        try {
+          await window.webln.enable();
+          const zapAmountMsats = 21000;
+          const zapTags = [['relays', ...state.relays], ['amount', String(zapAmountMsats)], ['p', stream.pubkey], ['e', stream.id]];
+          const zapRequest = await signAndPublish(9734, '⚡ zapping from NostrFlux', zapTags);
+          const [user, domain] = lud16.split('@');
+          const meta = await fetch(`https://${domain}/.well-known/lnurlp/${user}`).then((r) => r.json());
+          if (!meta.callback) throw new Error('Invalid LNURL response.');
+          const invoiceData = await fetch(`${meta.callback}?amount=${zapAmountMsats}&nostr=${encodeURIComponent(JSON.stringify(zapRequest))}`).then((r) => r.json());
+          if (!invoiceData.pr) throw new Error('No payment request returned.');
+          await window.webln.sendPayment(invoiceData.pr);
+          const zapBtn = qs('#theaterZapBtn');
+          if (zapBtn) { const o = zapBtn.innerHTML; zapBtn.textContent = '⚡ Zapped!'; setTimeout(() => { zapBtn.innerHTML = o; }, 2000); }
+          return;
+        } catch (err) { console.warn('WebLN zap failed:', err.message); }
+      }
+      window.open(`lightning:${lud16}`, '_blank');
+    };
+
+    // ---- Share stream ----
+    window.shareStream = async function () {
+      const stream = state.streamsByAddress.get(state.selectedStreamAddress);
+      const text = (stream && stream.title) ? `Watching "${stream.title}" live on Nostr` : 'Live stream on Nostr';
+      const url = window.location.href;
+      try {
+        if (navigator.share) { await navigator.share({ title: text, url }); }
+        else if (navigator.clipboard) {
+          await navigator.clipboard.writeText(url);
+          const btn = qs('.action-btn.share-btn');
+          if (btn) { const o = btn.textContent; btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = o; }, 1500); }
+        }
+      } catch (_) {}
+    };
+
+    // ---- Sign out: clear all data, go home ----
+    window.signOut = function () {
+      try { localStorage.clear(); } catch (_) {}
+      state.user = null; state.authMode = 'readonly'; state.localSecretKey = null;
+      state.pendingOnboardingNsec = ''; state.selectedStreamAddress = null;
+      state.selectedProfilePubkey = null; state.selectedProfileLiveAddress = null;
+      state.followedPubkeys = new Set(); state.contactListPubkeys = new Set();
+      state.nip51Lists = new Map(); state.savedExternalLists = [];
+      state.likedStreamAddresses = new Set();
+      window.closeAllDD();
+      ['goLiveModal','endModal','loginModal','settingsModal','faqModal'].forEach((id) => {
+        const el = qs('#' + id); if (el) el.classList.remove('open');
+      });
+      setUserUi();
+      stopAllAudio(null);
+      window.showPage('home');
     };
   }
 
