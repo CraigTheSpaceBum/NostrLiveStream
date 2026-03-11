@@ -7,10 +7,13 @@
   ];
 
   const KIND_PROFILE = 0;
+  const KIND_CONTACTS = 3;
   const KIND_REACTION = 7;
   const KIND_LIVE_EVENT = 30311;
   const KIND_LIVE_CHAT = 1311;
   const KIND_ZAP_RECEIPT = 9735;
+  const KIND_PEOPLE_LIST = 30000;   // NIP-51 people list
+  const KIND_GENERIC_LIST = 30001;  // NIP-51 generic list (bookmark-style)
 
   const LOCAL_NSEC_STORAGE_KEY = 'nostrflux_local_nsec';
   const NOSTR_TOOLS_SRC = 'https://unpkg.com/nostr-tools/lib/nostr.bundle.js';
@@ -31,6 +34,8 @@
     banner: ''
   };
 
+  const SAVED_LISTS_STORAGE_KEY = 'nostrflux_saved_lists_v1';
+
   const state = {
     relays: [...DEFAULT_RELAYS],
     settings: { ...DEFAULT_SETTINGS },
@@ -48,6 +53,9 @@
     chatSubId: null,
     profileFeedSubId: null,
     profileStatsSubId: null,
+    nip51SubId: null,
+    contactsSubId: null,
+    savedListsSubId: null,
     selectedStreamAddress: null,
     selectedProfilePubkey: null,
     selectedProfileLiveAddress: null,
@@ -60,6 +68,23 @@
     profilePlaybackToken: 0,
     relayPulseTimer: null,
     followedPubkeys: new Set(),
+    contactListPubkeys: new Set(),          // from kind:3 contact list
+    nip51Lists: new Map(),                  // listId -> { name, pubkeys, kind, d }
+    savedExternalLists: [],                 // [{ naddr, name, pubkeys }] from Liststr/external
+    activeListFilter: 'all',               // 'all' | 'following' | 'contacts' | listId | naddr
+    listFilterDDOpen: false,
+    // Hero featured stream cycling
+    heroHlsInstance: null,
+    heroPlaybackToken: 0,
+    featuredIndex: 0,
+    featuredCycleTimer: null,
+    featuredCycleStart: 0,
+    featuredCycleRafId: null,
+    featuredFailed: new Set(),             // addresses that failed playback
+    // Infinite scroll
+    liveGridPage: 0,
+    liveGridObserver: null,
+    GRID_PAGE_SIZE: 20,
     scriptPromises: {}
   };
 
@@ -752,7 +777,14 @@
   function sortedLiveStreams() {
     return Array.from(state.streamsByAddress.values())
       .filter((s) => s.status !== 'ended')
-      .sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+      .sort((a, b) => {
+        // Tier 1: has viewers > 0  →  Tier 2: has streaming URL but 0 viewers  →  Tier 3: no URL no viewers
+        const tierA = (a.participants || 0) > 0 ? 0 : (a.streaming ? 1 : 2);
+        const tierB = (b.participants || 0) > 0 ? 0 : (b.streaming ? 1 : 2);
+        if (tierA !== tierB) return tierA - tierB;
+        // Within same tier: higher viewers first
+        return (b.participants || 0) - (a.participants || 0);
+      });
   }
 
   function profileFor(pubkey) {
@@ -770,83 +802,714 @@
     };
   }
 
-  function renderLiveGrid() {
-    const grid = qs('#liveGrid');
-    if (!grid) return;
-    const streams = sortedLiveStreams().slice(0, 8);
-    const label = qs('#liveCountLabel') || qsa('.stream-main .sec-hd .see-all')[0];
-    if (label) label.textContent = `See all (${sortedLiveStreams().length}) ->`;
+  /* =====================================================================
+     NIP-51 PEOPLE LISTS + FOLLOWING LIVE SECTION
+     ===================================================================== */
 
-    if (streams.length === 0) {
-      grid.innerHTML = '<div class="stream-card"><div class="ci"><div class="ci-title">No live streams found yet. Keep this tab open while relays sync.</div></div></div>';
+  function loadSavedExternalLists() {
+    try {
+      const raw = localStorage.getItem(SAVED_LISTS_STORAGE_KEY);
+      state.savedExternalLists = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(state.savedExternalLists)) state.savedExternalLists = [];
+    } catch (_) {
+      state.savedExternalLists = [];
+    }
+  }
+
+  function persistSavedExternalLists() {
+    try {
+      localStorage.setItem(SAVED_LISTS_STORAGE_KEY, JSON.stringify(state.savedExternalLists));
+    } catch (_) {}
+  }
+
+  function parseNip51PeopleList(ev) {
+    const tagMap = parseTags(ev.tags || []);
+    const d = firstTag(tagMap, 'd') || '';
+    const name = firstTag(tagMap, 'name') || firstTag(tagMap, 'title') || d || 'Unnamed list';
+    const pubkeys = (ev.tags || [])
+      .filter((t) => t[0] === 'p' && t[1] && /^[0-9a-f]{64}$/i.test(t[1]))
+      .map((t) => t[1]);
+    return { id: `${ev.kind}:${ev.pubkey}:${d}`, name, pubkeys, kind: ev.kind, d, pubkey: ev.pubkey };
+  }
+
+  // Subscribe to user's kind:3 (contacts) and kind:30000 (people lists)
+  function subscribeUserLists(pubkey) {
+    if (!pubkey) return;
+
+    // Unsubscribe old
+    if (state.nip51SubId) { state.pool.unsubscribe(state.nip51SubId); state.nip51SubId = null; }
+    if (state.contactsSubId) { state.pool.unsubscribe(state.contactsSubId); state.contactsSubId = null; }
+
+    // Kind 3: contact list
+    state.contactsSubId = state.pool.subscribe(
+      [{ kinds: [KIND_CONTACTS], authors: [pubkey], limit: 1 }],
+      {
+        event: (ev) => {
+          if (ev.kind !== KIND_CONTACTS) return;
+          const pubs = (ev.tags || [])
+            .filter((t) => t[0] === 'p' && t[1] && /^[0-9a-f]{64}$/i.test(t[1]))
+            .map((t) => t[1]);
+          state.contactListPubkeys = new Set(pubs);
+          const cnt = qs('#lfFollowingCount');
+          if (cnt) cnt.textContent = pubs.length || '';
+          renderLiveGrid();
+        }
+      }
+    );
+
+    // Kind 30000: NIP-51 people lists
+    state.nip51SubId = state.pool.subscribe(
+      [{ kinds: [KIND_PEOPLE_LIST], authors: [pubkey], limit: 50 }],
+      {
+        event: (ev) => {
+          if (ev.kind !== KIND_PEOPLE_LIST) return;
+          const list = parseNip51PeopleList(ev);
+          if (!list.pubkeys.length) return;
+          state.nip51Lists.set(list.id, list);
+          renderListFilterDD();
+          renderLiveGrid();
+        }
+      }
+    );
+  }
+
+  // Subscribe to an external NIP-51 list by naddr (kind:30000:pubkey:d)
+  function subscribeExternalList(naddrOrUrl, onDone) {
+    let naddr = naddrOrUrl.trim();
+
+    // Handle Liststr URLs: https://listr.lol/a/naddr1...
+    const listrMatch = naddr.match(/\/a\/(naddr1[a-z0-9]+)/i);
+    if (listrMatch) naddr = listrMatch[1];
+
+    // Strip trailing slashes or query params
+    naddr = naddr.split(/[?#]/)[0].trim();
+
+    if (!naddr.startsWith('naddr1')) {
+      if (onDone) onDone(null, new Error('Not a valid naddr. Paste an naddr1… or a listr.lol URL.'));
       return;
     }
 
-    grid.innerHTML = '';
-    streams.forEach((stream) => {
-      const p = profileFor(stream.pubkey);
-      const card = document.createElement('div');
-      card.className = 'stream-card';
-      card.innerHTML = `
-        <div class="ct">
-          <div class="ct-inner"><div class="tc t2">LIVE</div></div>
-          <div class="cb-live"><span class="live-dot"></span>${stream.status.toUpperCase()}</div>
-          <div class="cb-viewers">views ${stream.participants || 0}</div>
-        </div>
-        <div class="ci">
-          <div class="ci-row">
-            <div class="ci-av">${pickAvatar(stream.pubkey)}</div>
-            <div>
-              <div class="ci-title"></div>
-              <div class="ci-host"></div>
-              <div class="ci-tags"><span class="tag">NIP-53</span></div>
-            </div>
+    // Decode via NostrTools
+    ensureNostrTools().then((tools) => {
+      let decoded;
+      try {
+        decoded = tools.nip19.decode(naddr);
+      } catch (e) {
+        if (onDone) onDone(null, new Error('Could not decode naddr: ' + e.message));
+        return;
+      }
+
+      if (!decoded || decoded.type !== 'naddr') {
+        if (onDone) onDone(null, new Error('Expected naddr type, got: ' + (decoded && decoded.type)));
+        return;
+      }
+
+      const { kind, pubkey, identifier, relays: hintRelays } = decoded.data;
+
+      const subId = state.pool.subscribe(
+        [{ kinds: [kind], authors: [pubkey], '#d': [identifier], limit: 1 }],
+        {
+          event: (ev) => {
+            if (ev.kind !== kind || ev.pubkey !== pubkey) return;
+            const list = parseNip51PeopleList(ev);
+            state.pool.unsubscribe(subId);
+
+            // Check if already saved
+            const existingIdx = state.savedExternalLists.findIndex((l) => l.naddr === naddr);
+            const entry = { naddr, name: list.name, pubkeys: list.pubkeys };
+            if (existingIdx >= 0) {
+              state.savedExternalLists[existingIdx] = entry;
+            } else {
+              state.savedExternalLists.push(entry);
+            }
+            persistSavedExternalLists();
+            renderListFilterDD();
+            if (onDone) onDone(entry, null);
+          },
+          eose: () => {
+            // If no event came back, report to caller
+            if (onDone) onDone(null, new Error('List not found on connected relays.'));
+          }
+        }
+      );
+    }).catch((e) => {
+      if (onDone) onDone(null, e);
+    });
+  }
+
+  // Get the pubkeys relevant to the current filter
+  function getPubkeysForFilter() {
+    const f = state.activeListFilter;
+    if (f === 'all') return null;                        // null = show everything
+    if (f === 'following') return state.followedPubkeys; // app-level follow set
+    if (f === 'contacts') return state.contactListPubkeys;
+
+    // NIP-51 list by id
+    const nip51 = state.nip51Lists.get(f);
+    if (nip51) return new Set(nip51.pubkeys);
+
+    // Saved external list by naddr
+    const saved = state.savedExternalLists.find((l) => l.naddr === f);
+    if (saved) return new Set(saved.pubkeys);
+
+    return null;
+  }
+
+  /* ---- Dropdown rendering ---- */
+  function renderListFilterDD() {
+    // NIP-51 owned lists
+    const nip51Section = qs('#lf-nip51-section');
+    const nip51Items = qs('#lf-nip51-items');
+    if (nip51Items) {
+      nip51Items.innerHTML = '';
+      if (state.nip51Lists.size > 0) {
+        if (nip51Section) nip51Section.style.display = '';
+        state.nip51Lists.forEach((list) => {
+          const btn = document.createElement('button');
+          btn.className = 'lf-item' + (state.activeListFilter === list.id ? ' active' : '');
+          btn.innerHTML = `<span class="lf-dot"></span><span class="lf-item-name"></span><span class="lf-item-count">${list.pubkeys.length}</span>`;
+          qs('.lf-item-name', btn).textContent = list.name;
+          btn.addEventListener('click', () => setListFilter(list.id, btn));
+          nip51Items.appendChild(btn);
+        });
+      } else {
+        if (nip51Section) nip51Section.style.display = 'none';
+      }
+    }
+
+    // Saved external lists
+    const savedSection = qs('#lf-saved-section');
+    const savedItems = qs('#lf-saved-items');
+    if (savedItems) {
+      savedItems.innerHTML = '';
+      if (state.savedExternalLists.length > 0) {
+        if (savedSection) savedSection.style.display = '';
+        state.savedExternalLists.forEach((entry) => {
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;align-items:center;';
+
+          const btn = document.createElement('button');
+          btn.className = 'lf-item' + (state.activeListFilter === entry.naddr ? ' active' : '');
+          btn.style.flex = '1';
+          btn.innerHTML = `<span class="lf-dot"></span><span class="lf-item-name"></span><span class="lf-item-count">${entry.pubkeys.length}</span>`;
+          qs('.lf-item-name', btn).textContent = entry.name;
+          btn.addEventListener('click', () => setListFilter(entry.naddr, btn));
+
+          // Remove button
+          const rem = document.createElement('button');
+          rem.title = 'Remove list';
+          rem.innerHTML = '&times;';
+          rem.style.cssText = 'background:none;border:none;color:var(--muted);cursor:pointer;font-size:.9rem;padding:.2rem .4rem;line-height:1;flex-shrink:0;';
+          rem.addEventListener('click', (e) => {
+            e.stopPropagation();
+            state.savedExternalLists = state.savedExternalLists.filter((l) => l.naddr !== entry.naddr);
+            persistSavedExternalLists();
+            if (state.activeListFilter === entry.naddr) setListFilter('all', qs('#lf-all'));
+            else renderListFilterDD();
+          });
+          rem.addEventListener('mouseover', () => { rem.style.color = 'var(--live)'; });
+          rem.addEventListener('mouseout', () => { rem.style.color = 'var(--muted)'; });
+
+          row.appendChild(btn);
+          row.appendChild(rem);
+          savedItems.appendChild(row);
+        });
+      } else {
+        if (savedSection) savedSection.style.display = 'none';
+      }
+    }
+  }
+
+  function setActiveListFilterBtn(activeId) {
+    // Deactivate all items
+    qsa('.lf-item').forEach((b) => b.classList.remove('active'));
+    const target = qs(`#lf-${activeId}`) || qs(`.lf-item.active`);
+    if (target) target.classList.add('active');
+  }
+
+  function getFilterLabelText() {
+    const f = state.activeListFilter;
+    if (f === 'all') return 'All Live';
+    if (f === 'following') return 'My Following';
+    if (f === 'contacts') return 'Contacts';
+    const n51 = state.nip51Lists.get(f);
+    if (n51) return n51.name;
+    const sv = state.savedExternalLists.find((l) => l.naddr === f);
+    if (sv) return sv.name;
+    return 'Custom List';
+  }
+
+  function renderFollowingCount() {
+    const cnt = qs('#lfFollowingCount');
+    if (cnt) cnt.textContent = state.followedPubkeys.size || '';
+  }
+
+
+  /* ---- Global controls wired to HTML ---- */
+  function toggleListFilterDDInternal(e) {
+    if (e) e.stopPropagation();
+    const dd = qs('#listFilterDD');
+    const btn = qs('#listFilterBtn');
+    if (!dd || !btn) return;
+    const isOpen = dd.classList.toggle('open');
+    btn.classList.toggle('open', isOpen);
+    state.listFilterDDOpen = isOpen;
+    if (isOpen) renderListFilterDD();
+  }
+
+  function closeListFilterDD() {
+    const dd = qs('#listFilterDD');
+    const btn = qs('#listFilterBtn');
+    if (dd) dd.classList.remove('open');
+    if (btn) btn.classList.remove('open');
+    state.listFilterDDOpen = false;
+  }
+
+  function setListFilterInternal(filterId, clickedBtn) {
+    state.activeListFilter = filterId;
+
+    // Update active class
+    qsa('.lf-item').forEach((b) => b.classList.remove('active'));
+    if (clickedBtn) clickedBtn.classList.add('active');
+
+    // Update button label
+    const label = qs('#listFilterLabel');
+    if (label) label.textContent = getFilterLabelText();
+
+    closeListFilterDD();
+    renderLiveGrid();
+  }
+
+  function lfAddInputChangeInternal(inputEl) {
+    // Optional: real-time validation feedback could go here
+  }
+
+  function lfAddListInternal() {
+    const input = qs('#lfAddInput');
+    if (!input) return;
+    const val = input.value.trim();
+    if (!val) return;
+
+    const btn = qs('.lf-add-btn');
+    if (btn) { btn.textContent = '…'; btn.disabled = true; }
+
+    subscribeExternalList(val, (entry, err) => {
+      if (btn) { btn.textContent = 'Add'; btn.disabled = false; }
+      if (err) {
+        const hint = qs('.lf-add-hint');
+        if (hint) { hint.style.color = 'var(--live)'; hint.textContent = err.message; setTimeout(() => { hint.style.color = ''; hint.textContent = 'Paste a Liststr URL or NIP-51 naddr to load a curated list of streamers.'; }, 4000); }
+        return;
+      }
+      input.value = '';
+      renderListFilterDD();
+      setListFilterInternal(entry.naddr, null);
+    });
+  }
+
+  function buildStreamCard(stream, idx) {
+    const p = profileFor(stream.pubkey);
+    const card = document.createElement('div');
+    const hasViewers = (stream.participants || 0) > 0;
+    const hasVideo = !!stream.streaming;
+    card.className = 'stream-card' + (!hasViewers && !hasVideo ? ' stream-card-dim' : '');
+
+    const gradients = ['t1','t2','t3','t4','t5','t6','t7','t8'];
+    let thumbHtml;
+    if (stream.image) {
+      const fb = gradients[idx % gradients.length];
+      thumbHtml = `<div class="ct-thumb-wrap"><img class="ct-thumb" src="${stream.image}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'tc ${fb}\\'></div>'"></div>`;
+    } else {
+      thumbHtml = `<div class="tc ${gradients[idx % gradients.length]}"></div>`;
+    }
+
+    const statusLabel = stream.status === 'planned' ? 'SOON' : stream.status.toUpperCase();
+    const statusBg = stream.status === 'planned' ? 'background:var(--purple)' : '';
+    const viewerText = hasViewers ? `&#128065; ${stream.participants.toLocaleString()}` : (hasVideo ? '&#128065; 0' : '&#8212;');
+
+    card.innerHTML = `
+      <div class="ct">
+        <div class="ct-inner">${thumbHtml}</div>
+        <div class="cb-live" style="${statusBg}"><span class="live-dot"></span>${statusLabel}</div>
+        <div class="cb-viewers">${viewerText}</div>
+      </div>
+      <div class="ci">
+        <div class="ci-row">
+          <div class="ci-av"></div>
+          <div>
+            <div class="ci-title"></div>
+            <div class="ci-host"></div>
+            <div class="ci-tags"><span class="tag">NIP-53</span></div>
           </div>
-        </div>`;
-      qs('.ci-title', card).textContent = stream.title;
-      qs('.ci-host', card).textContent = p.nip05 || p.name;
-      card.addEventListener('click', () => openStream(stream.address));
-      grid.appendChild(card);
+        </div>
+      </div>`;
+
+    const avEl = qs('.ci-av', card);
+    if (avEl) setAvatarEl(avEl, p.picture || '', pickAvatar(stream.pubkey));
+    qs('.ci-title', card).textContent = stream.title;
+    qs('.ci-host', card).textContent = p.nip05 || p.name;
+    card.addEventListener('click', () => openStream(stream.address));
+    return card;
+  }
+
+  function getFilteredStreams() {
+    const allStreams = sortedLiveStreams();
+    const filterPubkeys = getPubkeysForFilter();
+    return filterPubkeys
+      ? allStreams.filter((s) => filterPubkeys.has(s.pubkey))
+      : allStreams;
+  }
+
+  function renderLiveGrid() {
+    const grid = qs('#liveGrid');
+    const sentinel = qs('#liveGridSentinel');
+    if (!grid) return;
+
+    const allStreams = sortedLiveStreams();
+    const streams = getFilteredStreams();
+
+    // Update count pill
+    const pill = qs('#liveCountPill');
+    if (pill) pill.textContent = streams.length ? `${streams.length} live` : '';
+
+    // Reset page counter and disconnect old observer
+    state.liveGridPage = 0;
+    if (state.liveGridObserver) { state.liveGridObserver.disconnect(); state.liveGridObserver = null; }
+
+    // Loading state
+    if (allStreams.length === 0) {
+      grid.innerHTML = '<div class="live-grid-loading"><div class="lf-spinner"></div>Syncing streams from relays…</div>';
+      return;
+    }
+
+    // Empty for filter
+    if (streams.length === 0) {
+      const f = state.activeListFilter;
+      const filterName = f === 'following' ? 'your following list'
+        : (() => {
+          const n51 = state.nip51Lists.get(f);
+          if (n51) return `"${n51.name}"`;
+          const sv = state.savedExternalLists.find((l) => l.naddr === f);
+          if (sv) return `"${sv.name}"`;
+          return 'this filter';
+        })();
+      grid.innerHTML = `<div class="following-empty" style="grid-column:1/-1"><div class="following-empty-icon">📡</div><div class="following-empty-title">No live streams in ${filterName}</div><div class="following-empty-sub">Nobody in this list is streaming right now.</div></div>`;
+      return;
+    }
+
+    // Render first page
+    grid.innerHTML = '';
+    const firstBatch = streams.slice(0, state.GRID_PAGE_SIZE);
+    firstBatch.forEach((s, i) => grid.appendChild(buildStreamCard(s, i)));
+    state.liveGridPage = 1;
+
+    // If all loaded, show end marker
+    if (streams.length <= state.GRID_PAGE_SIZE) {
+      grid.insertAdjacentHTML('beforeend', `<div class="live-grid-end">&#8212; ${streams.length} streams loaded &#8212;</div>`);
+      return;
+    }
+
+    // Set up IntersectionObserver on sentinel for infinite scroll
+    if (sentinel && 'IntersectionObserver' in window) {
+      state.liveGridObserver = new IntersectionObserver((entries) => {
+        if (!entries[0].isIntersecting) return;
+        loadMoreStreams();
+      }, { rootMargin: '200px' });
+      state.liveGridObserver.observe(sentinel);
+    }
+  }
+
+  function loadMoreStreams() {
+    const grid = qs('#liveGrid');
+    if (!grid) return;
+    const streams = getFilteredStreams();
+    const start = state.liveGridPage * state.GRID_PAGE_SIZE;
+    if (start >= streams.length) {
+      if (state.liveGridObserver) { state.liveGridObserver.disconnect(); state.liveGridObserver = null; }
+      // Remove existing end marker then add final one
+      const existing = grid.querySelector('.live-grid-end');
+      if (existing) existing.remove();
+      grid.insertAdjacentHTML('beforeend', `<div class="live-grid-end">&#8212; ${streams.length} streams loaded &#8212;</div>`);
+      return;
+    }
+
+    const batch = streams.slice(start, start + state.GRID_PAGE_SIZE);
+    const offset = start; // for gradient cycling
+    batch.forEach((s, i) => grid.appendChild(buildStreamCard(s, offset + i)));
+    state.liveGridPage++;
+  }
+
+  /* =========================================================
+     HERO FEATURED STREAM SYSTEM
+     - Only features streams with participants >= 1
+     - Autoplay with AUDIO (muted only if browser blocks)
+     - Skips streams where playback fails
+     - Sci-fi glitch/scan-line transition between streams
+     - Cycles every 60 s with progress bar; prev/next nav
+     ========================================================= */
+
+  function heroFeaturedStreams() {
+    return sortedLiveStreams().filter(
+      (s) => (s.participants || 0) >= 1 && !state.featuredFailed.has(s.address)
+    );
+  }
+
+  /* ---- Sci-fi transition animation ---- */
+  function runHeroTransition(cb) {
+    const ov = qs('#heroTransitionOv');
+    const player = qs('#heroPlayer');
+    if (!ov) { cb(); return; }
+
+    // Spawn data-rain particles
+    const NUM_PARTICLES = 18;
+    const particles = [];
+    for (let i = 0; i < NUM_PARTICLES; i++) {
+      const p = document.createElement('div');
+      p.className = 'hero-data-particle';
+      const h = 30 + Math.random() * 120;
+      p.style.cssText = `left:${Math.random() * 100}%;height:${h}px;animation-delay:${Math.random() * 0.25}s;opacity:0;`;
+      ov.appendChild(p);
+      particles.push(p);
+    }
+
+    // Show the fx layers
+    ['heroScanLine','heroGlitchA','heroGlitchB','heroGridFlash','heroStatic'].forEach((id) => {
+      const el = qs(`#${id}`);
+      if (el) el.style.display = '';
+    });
+    ov.classList.add('active');
+
+    // Glitch background on hero player too
+    if (player) player.style.filter = 'brightness(1.4) hue-rotate(-15deg)';
+
+    setTimeout(() => {
+      if (player) player.style.filter = '';
+      // Clear particles
+      particles.forEach((p) => p.remove());
+      ['heroScanLine','heroGlitchA','heroGlitchB','heroGridFlash','heroStatic'].forEach((id) => {
+        const el = qs(`#${id}`);
+        if (el) el.style.display = 'none';
+      });
+      ov.classList.remove('active');
+      cb();
+    }, 680);
+  }
+
+  /* ---- Progress bar RAF loop ---- */
+  function startProgressBar() {
+    const fill = qs('#heroCycleBarFill');
+    if (!fill) return;
+    fill.style.transition = 'none';
+    fill.style.width = '0%';
+    state.featuredCycleStart = Date.now();
+
+    function tick() {
+      const elapsed = Date.now() - state.featuredCycleStart;
+      const pct = Math.min((elapsed / 60000) * 100, 100);
+      fill.style.width = pct + '%';
+      if (pct < 100) {
+        state.featuredCycleRafId = requestAnimationFrame(tick);
+      }
+    }
+    if (state.featuredCycleRafId) cancelAnimationFrame(state.featuredCycleRafId);
+    state.featuredCycleRafId = requestAnimationFrame(tick);
+  }
+
+  /* ---- Indicators ---- */
+  function renderHeroIndicators(streams, activeIdx) {
+    const wrap = qs('#heroIndicators');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    const count = Math.min(streams.length, 12);
+    for (let i = 0; i < count; i++) {
+      const dot = document.createElement('button');
+      dot.className = 'hero-dot' + (i === activeIdx ? ' active' : '');
+      dot.addEventListener('click', (e) => { e.stopPropagation(); heroGoTo(i, true); });
+      wrap.appendChild(dot);
+    }
+  }
+
+  /* ---- Clear hero HLS ---- */
+  function clearHeroPlayback() {
+    state.heroPlaybackToken++;
+    if (state.heroHlsInstance) {
+      try { state.heroHlsInstance.destroy(); } catch (_) {}
+      state.heroHlsInstance = null;
+    }
+  }
+
+  /* ---- Load and autoplay with AUDIO ---- */
+  async function renderHeroPlayer(stream, token) {
+    const playerEl = qs('#heroPlayer');
+    const bgEl = qs('#heroPlayerBg');
+    const ovEl = qs('#heroPlayOv');
+    if (!playerEl || !bgEl) return;
+
+    const url = (stream.streaming || '').trim();
+    const image = (stream.image || '').trim();
+
+    // Set background: thumbnail or gradient
+    if (image) {
+      bgEl.style.cssText = `width:100%;height:100%;background:url(${JSON.stringify(image)}) center/cover no-repeat,linear-gradient(135deg,#0d1e30,#1a0a00);`;
+    } else {
+      bgEl.style.cssText = 'width:100%;height:100%;background:linear-gradient(135deg,#0d1e30,#1a0a00,#080d18);';
+    }
+
+    // Wipe any existing video
+    const existingVid = playerEl.querySelector('video');
+    if (existingVid) existingVid.remove();
+    if (ovEl) ovEl.style.display = '';
+
+    if (!url || !/^https?:\/\//i.test(url)) return;
+
+    const video = document.createElement('video');
+    // Start muted so browser allows autoplay, then unmute immediately
+    video.muted = true;
+    video.autoplay = true;
+    video.playsInline = true;
+    video.preload = 'auto';
+    video.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000;z-index:2;';
+
+    const isHls = /\.m3u8($|\?)/i.test(url);
+    let hlsObj = null;
+
+    // On media loaded / playing → unmute for audio
+    const onCanPlay = () => {
+      if (token !== state.heroPlaybackToken) return;
+      video.muted = false; // restore audio
+      video.volume = 0.8;
+      if (ovEl) ovEl.style.display = 'none';
+    };
+    video.addEventListener('canplay', onCanPlay, { once: true });
+
+    // On error → mark as failed and advance
+    video.addEventListener('error', () => {
+      if (token !== state.heroPlaybackToken) return;
+      state.featuredFailed.add(stream.address);
+      heroAdvance(1); // skip to next
     });
 
-    const following = qs('#followingLiveList');
-    if (following) {
-      following.innerHTML = '';
-      streams.slice(0, 3).forEach((s) => {
-        const p = profileFor(s.pubkey);
-        const row = document.createElement('div');
-        row.className = 'sb-link sb-live';
-        row.innerHTML = `<span class="live-ind"></span><div class="sb-av">${pickAvatar(s.pubkey)}</div><span>${p.name}</span>`;
-        row.addEventListener('click', () => openStream(s.address));
-        following.appendChild(row);
+    playerEl.appendChild(video);
+
+    if (isHls) {
+      if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = url;
+        video.play().catch(() => {});
+      } else {
+        try {
+          const Hls = await ensureHlsJs();
+          if (token !== state.heroPlaybackToken) return;
+          if (Hls.isSupported()) {
+            hlsObj = new Hls({ enableWorker: true, lowLatencyMode: true, maxBufferLength: 10 });
+            state.heroHlsInstance = hlsObj;
+            hlsObj.loadSource(url);
+            hlsObj.attachMedia(video);
+            hlsObj.on(Hls.Events.MANIFEST_PARSED, () => {
+              if (token !== state.heroPlaybackToken) return;
+              video.play().catch(() => {});
+            });
+            hlsObj.on(Hls.Events.ERROR, (_e, data) => {
+              if (data && data.fatal && token === state.heroPlaybackToken) {
+                state.featuredFailed.add(stream.address);
+                heroAdvance(1);
+              }
+            });
+          }
+        } catch (_) {
+          if (token === state.heroPlaybackToken) {
+            state.featuredFailed.add(stream.address);
+            heroAdvance(1);
+          }
+        }
+      }
+    } else {
+      video.src = url;
+      video.play().catch(() => {});
+    }
+  }
+
+  /* ---- Render hero info panel ---- */
+  function renderHero(stream, idx, total) {
+    if (!stream) return;
+    const p = profileFor(stream.pubkey);
+
+    const set = (id, v) => { const el = qs('#' + id); if (el) el.textContent = v; };
+    set('heroTitle', stream.title);
+    set('heroSummary', stream.summary || 'Live stream on Nostr.');
+    set('heroHostName', p.name);
+    set('heroStatusLabel', (stream.status || 'live').toUpperCase());
+    set('heroViewers', stream.participants ? stream.participants.toLocaleString() : '—');
+    set('heroSats', '—');
+    set('heroTime', stream.starts ? new Date(stream.starts * 1000).toUTCString().slice(17, 22) + ' UTC' : 'live');
+
+    const avEl = qs('#heroAv');
+    if (avEl) setAvatarEl(avEl, p.picture || '', pickAvatar(stream.pubkey));
+    const nip05El = qs('#heroNip05');
+    if (nip05El) { nip05El.style.display = p.nip05 ? 'inline' : 'none'; if (p.nip05) nip05El.title = p.nip05; }
+
+    // Wire click to open stream
+    const heroEl = qs('#heroStream');
+    if (heroEl) heroEl.onclick = () => openStream(stream.address);
+    const watchBtn = qs('#heroWatchBtn');
+    if (watchBtn) watchBtn.onclick = (e) => { e.stopPropagation(); openStream(stream.address); };
+
+    renderHeroIndicators(heroFeaturedStreams(), idx);
+  }
+
+  /* ---- Navigate to a specific index ---- */
+  function heroGoTo(idx, userInitiated) {
+    const streams = heroFeaturedStreams();
+    if (!streams.length) return;
+    state.featuredIndex = ((idx % streams.length) + streams.length) % streams.length;
+
+    if (userInitiated) {
+      // Instant switch without transition for user-clicked nav
+      clearHeroPlayback();
+      const token = state.heroPlaybackToken;
+      renderHero(streams[state.featuredIndex], state.featuredIndex, streams.length);
+      renderHeroPlayer(streams[state.featuredIndex], token);
+      resetHeroCycle();
+    } else {
+      // Auto-cycle: play the sci-fi transition then swap
+      runHeroTransition(() => {
+        clearHeroPlayback();
+        const token = state.heroPlaybackToken;
+        renderHero(streams[state.featuredIndex], state.featuredIndex, streams.length);
+        renderHeroPlayer(streams[state.featuredIndex], token);
       });
     }
   }
 
-  function renderHero(stream) {
-    const hero = qs('.hero-stream');
-    if (!hero || !stream) return;
-    const p = profileFor(stream.pubkey);
-    qs('.hero-title', hero).textContent = stream.title;
-    qs('.hero-summary', hero).textContent = stream.summary || 'Live stream on Nostr.';
-    const heroAv = qs('.hero-av', hero);
-    if (heroAv) setAvatarEl(heroAv, p.picture || '', pickAvatar(stream.pubkey));
-    const hostSpan = qs('.hero-host span[style*="font-weight:600"]', hero);
-    if (hostSpan) hostSpan.textContent = p.name;
-    const nip05 = qs('.hero-host .nip05-badge', hero);
-    if (nip05) nip05.style.display = p.nip05 ? 'inline' : 'none';
-    const stats = qsa('.hero-stats .h-stat .val', hero);
-    if (stats[0]) stats[0].textContent = `${stream.participants || 0}`;
-    if (stats[1]) stats[1].textContent = 'sat flow';
-    if (stats[2]) stats[2].textContent = stream.starts ? new Date(stream.starts * 1000).toUTCString().slice(17, 22) + ' UTC' : 'live';
-    hero.onclick = () => openStream(stream.address);
-    const watchBtn = qs('.hero-actions .btn-primary', hero);
-    if (watchBtn) {
-      watchBtn.onclick = (e) => {
-        e.stopPropagation();
-        openStream(stream.address);
-      };
-    }
+  /* ---- Advance by delta (wraps) ---- */
+  function heroAdvance(delta) {
+    const streams = heroFeaturedStreams();
+    if (!streams.length) return;
+    heroGoTo(state.featuredIndex + delta, false);
+    resetHeroCycle();
+  }
+
+  /* ---- Reset / restart the 60-s cycle timer ---- */
+  function resetHeroCycle() {
+    if (state.featuredCycleTimer) clearInterval(state.featuredCycleTimer);
+    startProgressBar();
+    state.featuredCycleTimer = setInterval(() => heroAdvance(1), 60000);
+  }
+
+  /* ---- Start hero cycle on page load ---- */
+  function startHeroCycle() {
+    const streams = heroFeaturedStreams();
+    if (!streams.length) return;
+    state.featuredIndex = Math.floor(Math.random() * streams.length);
+    clearHeroPlayback();
+    const token = state.heroPlaybackToken;
+    renderHero(streams[state.featuredIndex], state.featuredIndex, streams.length);
+    renderHeroPlayer(streams[state.featuredIndex], token);
+    resetHeroCycle();
+  }
+
+  function stopHeroCycle() {
+    if (state.featuredCycleTimer) { clearInterval(state.featuredCycleTimer); state.featuredCycleTimer = null; }
+    if (state.featuredCycleRafId) { cancelAnimationFrame(state.featuredCycleRafId); state.featuredCycleRafId = null; }
+    clearHeroPlayback();
   }
 
   function clearPlayback() {
@@ -1113,6 +1776,10 @@
     if (pdSub) { const base = p.nip05 || shortHex(state.user.pubkey); pdSub.textContent = state.authMode === 'local' ? `${base} (local key)` : base; }
     if (navBadge) navBadge.style.display = p.nip05 ? 'inline' : 'none';
     if (pdBadge) pdBadge.style.display = p.nip05 ? 'inline' : 'none';
+
+    // Load user's contact list + NIP-51 people lists for the filter dropdown
+    subscribeUserLists(state.user.pubkey);
+    renderFollowingCount();
   }
 
   function subscribeProfiles(pubkeys) {
@@ -1148,10 +1815,8 @@
         },
         eose: () => {
           renderLiveGrid();
+          if (!state.featuredCycleTimer) startHeroCycle();
           const streams = sortedLiveStreams();
-          if (streams.length && !state.selectedStreamAddress) {
-            renderHero(streams[0]);
-          }
           const pubs = streams.map((s) => s.pubkey);
           subscribeProfiles(pubs);
           if (state.selectedProfilePubkey) renderProfilePage(state.selectedProfilePubkey);
@@ -2391,7 +3056,9 @@
     state.selectedStreamAddress = stream.address;
     state.isLive = status === 'live';
     renderLiveGrid();
-    renderHero(stream);
+    // Refresh hero if this is the currently featured stream
+    const featStreams = heroFeaturedStreams();
+    if (featStreams.length) renderHero(featStreams[state.featuredIndex], state.featuredIndex, featStreams.length);
     renderVideo(stream);
     subscribeChat(stream);
     return stream;
@@ -2516,6 +3183,58 @@
       window.closeDD('profile');
     };
 
+    /* ---- Master audio/playback stop ----
+       Call with which player to KEEP playing ('hero' | 'theater' | 'profile' | null).
+       All other active players are paused and their HLS instances destroyed.       */
+    function stopAllAudio(keep) {
+      // --- Hero ---
+      if (keep !== 'hero') {
+        // Pause any <video> inside the hero player
+        const heroPlayer = qs('#heroPlayer');
+        if (heroPlayer) {
+          heroPlayer.querySelectorAll('video').forEach((v) => {
+            try { v.pause(); v.src = ''; } catch (_) {}
+          });
+        }
+        // Destroy HLS instance
+        if (state.heroHlsInstance) {
+          try { state.heroHlsInstance.destroy(); } catch (_) {}
+          state.heroHlsInstance = null;
+        }
+        state.heroPlaybackToken++;
+      }
+
+      // --- Theater (video page) ---
+      if (keep !== 'theater') {
+        const playerBg = qs('.player-bg');
+        if (playerBg) {
+          playerBg.querySelectorAll('video').forEach((v) => {
+            try { v.pause(); v.src = ''; } catch (_) {}
+          });
+        }
+        if (state.hlsInstance) {
+          try { state.hlsInstance.destroy(); } catch (_) {}
+          state.hlsInstance = null;
+        }
+        state.playbackToken++;
+      }
+
+      // --- Profile mini-player ---
+      if (keep !== 'profile') {
+        const profilePlayer = qs('#profileLivePlayer');
+        if (profilePlayer) {
+          profilePlayer.querySelectorAll('video').forEach((v) => {
+            try { v.pause(); v.src = ''; } catch (_) {}
+          });
+        }
+        if (state.profileHlsInstance) {
+          try { state.profileHlsInstance.destroy(); } catch (_) {}
+          state.profileHlsInstance = null;
+        }
+        state.profilePlaybackToken++;
+      }
+    }
+
     window.showPage = function (p) {
       const home = qs('#homePage');
       const video = qs('#videoPage');
@@ -2523,6 +3242,19 @@
       if (home) home.classList.toggle('active', p === 'home');
       if (video) video.style.display = 'none';
       if (profile) profile.style.display = 'none';
+      // Going home: stop theater + profile, let hero resume
+      stopAllAudio('hero');
+      // Restart hero if it was stopped and streams are available
+      if (p === 'home' && !state.featuredCycleTimer) startHeroCycle();
+      else if (p === 'home') {
+        // Re-attach hero video if it was paused out
+        const streams = heroFeaturedStreams();
+        if (streams.length) {
+          const idx = ((state.featuredIndex % streams.length) + streams.length) % streams.length;
+          const token = state.heroPlaybackToken;
+          renderHeroPlayer(streams[idx], token);
+        }
+      }
       if (state.settings.miniPlayer && state.selectedStreamAddress) window.showMini();
       else window.hideMini();
       window.scrollTo(0, 0);
@@ -2535,6 +3267,8 @@
       if (home) home.classList.remove('active');
       if (video) video.style.display = 'block';
       if (profile) profile.style.display = 'none';
+      // Going to theater: stop hero + profile audio
+      stopAllAudio('theater');
       if (state.settings.miniPlayer && state.selectedStreamAddress) window.showMini();
       else window.hideMini();
       window.scrollTo(0, 0);
@@ -2547,6 +3281,8 @@
       if (home) home.classList.remove('active');
       if (video) video.style.display = 'none';
       if (profile) profile.style.display = 'block';
+      // Going to profile: stop hero + theater audio
+      stopAllAudio('profile');
 
       setAvatarEl(qs('#profAv'), '', av || 'U');
       if (qs('#profName')) qs('#profName').textContent = name || 'user';
@@ -2636,6 +3372,40 @@
     window.goBackFromProfile = function () {
       window.showPage('home');
     };
+
+    window.heroNav = function (delta) {
+      heroAdvance(delta);
+      resetHeroCycle();
+    };
+
+    window.heroWatchCurrent = function () {
+      const streams = heroFeaturedStreams();
+      if (!streams.length) return;
+      const idx = ((state.featuredIndex % streams.length) + streams.length) % streams.length;
+      openStream(streams[idx].address);
+    };
+
+    /* ---- NIP-51 / Following Live filter globals ---- */
+    window.toggleListFilterDD = function (e) {
+      toggleListFilterDDInternal(e);
+    };
+
+    window.setListFilter = function (filterId, clickedBtn) {
+      setListFilterInternal(filterId, clickedBtn);
+    };
+
+    window.lfAddInputChange = function (el) {
+      lfAddInputChangeInternal(el);
+    };
+
+    window.lfAddList = function () {
+      lfAddListInternal();
+    };
+
+    // Close list filter dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('#listFilterWrap')) closeListFilterDD();
+    });
 
     window.openMyProfile = function () {
       if (!state.user) {
@@ -2940,6 +3710,7 @@
   async function init() {
     loadSettingsFromStorage();
     loadFollowedPubkeys();
+    loadSavedExternalLists();
     applySettingsToDocument();
 
     bindLegacyGlobals();
@@ -2954,6 +3725,10 @@
     initRelay();
     await tryRestoreLocalLogin();
     setUserUi();
+
+    // Render saved external lists immediately (they come from localStorage)
+    renderListFilterDD();
+    renderLiveGrid();
   }
 
   document.addEventListener('DOMContentLoaded', init);

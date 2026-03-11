@@ -164,7 +164,6 @@ nav {
 .hero-stream{position:relative;height:450px;overflow:hidden;cursor:pointer;background:linear-gradient(160deg,#0a1520 0%,#120800 60%,#080b0f 100%);}
 .hero-bg{position:absolute;inset:0;background:radial-gradient(ellipse 60% 60% at 28% 50%,rgba(232,70,10,.11) 0%,transparent 70%),radial-gradient(ellipse 40% 80% at 80% 30%,rgba(247,183,49,.05) 0%,transparent 70%);}
 .hero-grid-ov{position:absolute;inset:0;background-image:linear-gradient(rgba(255,77,0,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(255,77,0,.04) 1px,transparent 1px);background-size:48px 48px;mask-image:radial-gradient(ellipse 70% 100% at 40% 50%,black 0%,transparent 80%);}
-.hero-player{position:absolute;left:4%;top:50%;transform:translateY(-50%);width:54%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;background:#000;border:1px solid rgba(255,255,255,.07);box-shadow:0 24px 80px rgba(0,0,0,.8);}
 .stream-visual{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:4rem;}
 .play-ov{position:absolute;inset:0;background:rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;}
 .play-btn-big{width:58px;height:58px;border-radius:50%;background:rgba(255,255,255,.12);backdrop-filter:blur(8px);border:2px solid rgba(255,255,255,.25);display:flex;align-items:center;justify-content:center;font-size:1.3rem;transition:all .2s;}
@@ -188,16 +187,16 @@ nav {
 .cat-chip{flex-shrink:0;padding:.28rem .75rem;border-radius:20px;font-size:.76rem;font-weight:500;cursor:pointer;border:1px solid var(--border2);color:var(--text2);background:transparent;font-family:'DM Sans',sans-serif;transition:all .15s;white-space:nowrap;}
 .cat-chip:hover,.cat-chip.active{background:var(--accent);border-color:var(--accent);color:#fff;}
 
-.home-layout{display:grid;grid-template-columns:185px 1fr;}
-.left-sidebar{background:var(--surface);border-right:1px solid var(--border);padding:.8rem .6rem;}
-.sb-sec{margin-bottom:1.05rem;}
-.sb-label{font-family:'DM Mono',monospace;font-size:.61rem;color:var(--muted);text-transform:uppercase;letter-spacing:.12em;padding:.2rem .45rem;margin-bottom:.28rem;display:block;}
-.sb-link{display:flex;align-items:center;gap:.5rem;padding:.42rem .5rem;border-radius:7px;font-size:.79rem;color:var(--text2);cursor:pointer;transition:all .12s;}
-.sb-link:hover{background:var(--surface2);color:var(--text);}
-.sb-live .live-ind{width:7px;height:7px;border-radius:50%;background:var(--live);flex-shrink:0;animation:dotP 1.2s ease infinite;}
-.sb-av{width:22px;height:22px;border-radius:50%;background:var(--surface3);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:.7rem;}
-
-.stream-main{padding:1rem 1.2rem;}
+.stream-main{padding:1rem 1.4rem;}
+.live-now-hd{display:flex;align-items:center;gap:.65rem;margin-bottom:1rem;flex-wrap:wrap;}
+.live-now-hd h2{font-family:'Syne',sans-serif;font-weight:700;font-size:1rem;white-space:nowrap;}
+.live-count-pill{font-family:'DM Mono',monospace;font-size:.62rem;color:var(--live);background:rgba(255,59,92,.1);border:1px solid rgba(255,59,92,.22);border-radius:4px;padding:.14rem .46rem;white-space:nowrap;}
+.live-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.85rem;}
+.live-grid-sentinel{height:1px;grid-column:1/-1;}
+.live-grid-loading{grid-column:1/-1;display:flex;align-items:center;justify-content:center;gap:.55rem;padding:1.4rem;color:var(--muted);font-size:.8rem;}
+.live-grid-end{grid-column:1/-1;text-align:center;padding:1.2rem;font-family:'DM Mono',monospace;font-size:.65rem;color:var(--muted);letter-spacing:.05em;}
+.stream-card-dim{opacity:.45;}
+/* sec-hd kept for video page */
 .sec-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:.7rem;}
 .sec-hd h2{font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;}
 .see-all{font-size:.75rem;color:var(--muted);cursor:pointer;}.see-all:hover{color:var(--text);}
@@ -611,11 +610,257 @@ body.no-chat-anim .cmsg{animation:none!important;}
 .end-confirm-modal{background:var(--surface);border:1px solid rgba(255,59,92,.3);border-radius:16px;width:min(340px,94vw);padding:1.5rem;text-align:center;animation:slideUp .2s ease;position:relative;}
 .end-confirm-modal::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--live);border-radius:16px 16px 0 0;}
 
+/* ======== LIST FILTER DROPDOWN ======== */
+.sec-hd-left{display:flex;align-items:center;gap:.55rem;flex:1;min-width:0;}
+.list-filter-wrap{position:relative;flex-shrink:0;}
+.list-filter-btn{
+  display:inline-flex;align-items:center;gap:.38rem;
+  padding:.26rem .6rem .26rem .72rem;
+  border-radius:8px;border:1px solid var(--border2);
+  background:var(--surface2);color:var(--text2);
+  font-size:.74rem;font-weight:600;cursor:pointer;
+  font-family:'DM Sans',sans-serif;
+  transition:all .15s;white-space:nowrap;max-width:180px;
+}
+.list-filter-btn:hover{border-color:var(--accent);color:var(--text);}
+.list-filter-btn.open{border-color:var(--purple);color:var(--purple);background:rgba(155,114,255,.06);}
+.list-filter-btn-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px;}
+.list-filter-caret{flex-shrink:0;font-size:.6rem;opacity:.7;transition:transform .2s;}
+.list-filter-btn.open .list-filter-caret{transform:rotate(180deg);}
+.list-filter-dd{
+  position:absolute;top:calc(100% + 5px);left:0;
+  min-width:220px;max-width:300px;
+  background:var(--surface);border:1px solid var(--border2);
+  border-radius:12px;padding:.45rem;
+  box-shadow:0 20px 60px rgba(0,0,0,.8),0 0 0 1px rgba(255,255,255,.03);
+  z-index:400;opacity:0;pointer-events:none;
+  transform:translateY(-5px);transition:opacity .15s,transform .15s;
+}
+.list-filter-dd.open{opacity:1;pointer-events:all;transform:translateY(0);}
+.lf-section-label{
+  font-family:'DM Mono',monospace;font-size:.6rem;
+  text-transform:uppercase;letter-spacing:.1em;
+  color:var(--muted);padding:.18rem .6rem .28rem;display:block;
+}
+.lf-item{
+  display:flex;align-items:center;gap:.6rem;
+  padding:.46rem .65rem;border-radius:8px;
+  font-size:.8rem;color:var(--text2);cursor:pointer;
+  transition:background .1s;border:none;background:none;
+  width:100%;text-align:left;font-family:'DM Sans',sans-serif;
+}
+.lf-item:hover{background:var(--surface2);color:var(--text);}
+.lf-item.active{color:var(--purple);background:rgba(155,114,255,.08);}
+.lf-item.active .lf-dot{background:var(--purple);}
+.lf-dot{width:7px;height:7px;border-radius:50%;background:var(--border2);flex-shrink:0;transition:background .15s;}
+.lf-item-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.lf-item-count{font-family:'DM Mono',monospace;font-size:.65rem;color:var(--muted);flex-shrink:0;}
+.lf-sep{height:1px;background:var(--border);margin:.3rem 0;}
+
+/* Add list row */
+.lf-add-row{display:flex;align-items:center;gap:.4rem;padding:.32rem .45rem;}
+.lf-add-input{
+  flex:1;background:var(--surface2);border:1px solid var(--border2);
+  border-radius:7px;padding:.3rem .55rem;color:var(--text);
+  font-family:'DM Mono',monospace;font-size:.7rem;outline:none;
+}
+.lf-add-input:focus{border-color:var(--purple);}
+.lf-add-input::placeholder{color:var(--muted);}
+.lf-add-btn{
+  flex-shrink:0;padding:.3rem .55rem;border-radius:7px;
+  background:var(--surface3);border:1px solid var(--border2);
+  color:var(--text2);font-size:.72rem;font-weight:600;cursor:pointer;
+  font-family:'DM Sans',sans-serif;transition:all .12s;white-space:nowrap;
+}
+.lf-add-btn:hover{border-color:var(--purple);color:var(--purple);}
+.lf-add-hint{font-family:'DM Mono',monospace;font-size:.62rem;color:var(--muted);padding:.1rem .65rem .35rem;line-height:1.4;}
+
+/* Following grid empty state */
+.following-empty{
+  grid-column:1/-1;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:2rem 1rem;gap:.65rem;text-align:center;
+  border:1px dashed var(--border2);border-radius:10px;
+}
+.following-empty-icon{font-size:2rem;opacity:.4;}
+.following-empty-title{font-size:.85rem;font-weight:600;color:var(--text2);}
+.following-empty-sub{font-size:.75rem;color:var(--muted);line-height:1.55;max-width:300px;}
+.following-loading{
+  grid-column:1/-1;
+  display:flex;align-items:center;justify-content:center;gap:.5rem;
+  padding:1.5rem;color:var(--muted);font-size:.8rem;font-family:'DM Mono',monospace;
+}
+.lf-spinner{
+  width:14px;height:14px;border-radius:50%;
+  border:2px solid var(--border2);border-top-color:var(--purple);
+  animation:spin .7s linear infinite;flex-shrink:0;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Nip51 tag chip on stream cards in following grid */
+.ci-nip51-badge{
+  display:inline-flex;align-items:center;gap:.25rem;
+  font-family:'DM Mono',monospace;font-size:.6rem;
+  color:var(--purple);background:rgba(155,114,255,.1);
+  border:1px solid rgba(155,114,255,.2);border-radius:3px;
+  padding:.08rem .32rem;
+}
+
 /* footer */
 footer{padding:1rem 1.2rem;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;background:var(--surface);}
 footer .flogo{font-family:'Syne',sans-serif;font-weight:800;font-size:.95rem;display:flex;align-items:center;gap:.32rem;}
 footer p{font-size:.72rem;color:var(--muted);}
 .nostr-pill{font-family:'DM Mono',monospace;font-size:.66rem;color:var(--purple);background:rgba(155,114,255,.1);border:1px solid rgba(155,114,255,.2);border-radius:4px;padding:.17rem .48rem;}
+
+/* ======== HERO FEATURED STREAM ======== */
+/* Sci-fi transition overlay */
+.hero-transition-ov{
+  position:absolute;inset:0;z-index:30;pointer-events:none;
+  display:none;
+}
+.hero-transition-ov.active{display:block;}
+
+/* Scanline sweep effect */
+@keyframes scanSweep{
+  0%{transform:translateY(-100%);opacity:0;}
+  15%{opacity:1;}
+  85%{opacity:1;}
+  100%{transform:translateY(100%);opacity:0;}
+}
+.hero-scan-line{
+  position:absolute;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent,rgba(232,70,10,.9),rgba(247,183,49,.7),rgba(232,70,10,.9),transparent);
+  box-shadow:0 0 18px 4px rgba(232,70,10,.55),0 0 60px 12px rgba(232,70,10,.2);
+  transform:translateY(-100%);
+  animation:scanSweep 0.7s cubic-bezier(.4,0,.2,1) forwards;
+}
+
+/* Glitch slice layers */
+@keyframes glitchSlice{
+  0%{clip-path:inset(0 0 95% 0);transform:translateX(-8px);opacity:0;}
+  10%{opacity:1;}
+  30%{clip-path:inset(20% 0 60% 0);transform:translateX(6px);}
+  50%{clip-path:inset(55% 0 20% 0);transform:translateX(-4px);}
+  70%{clip-path:inset(80% 0 5% 0);transform:translateX(3px);}
+  100%{clip-path:inset(0 0 100% 0);transform:translateX(0);opacity:0;}
+}
+.hero-glitch-a,.hero-glitch-b{
+  position:absolute;inset:0;
+  background:inherit;
+  opacity:0;
+}
+.hero-glitch-a{
+  animation:glitchSlice 0.65s steps(1) forwards;
+  filter:hue-rotate(-40deg) saturate(2);
+  mix-blend-mode:screen;
+}
+.hero-glitch-b{
+  animation:glitchSlice 0.65s steps(1) 0.04s reverse forwards;
+  filter:hue-rotate(80deg) saturate(1.8);
+  mix-blend-mode:screen;
+}
+
+/* Grid flash */
+@keyframes gridFlash{
+  0%,100%{opacity:0;}
+  20%,40%,60%{opacity:.18;}
+  30%,50%{opacity:.05;}
+}
+.hero-grid-flash{
+  position:absolute;inset:0;
+  background-image:
+    linear-gradient(rgba(232,70,10,.45) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(232,70,10,.45) 1px,transparent 1px);
+  background-size:32px 32px;
+  animation:gridFlash 0.7s ease forwards;
+}
+
+/* Data stream particles */
+@keyframes dataRain{
+  0%{transform:translateY(-10px);opacity:.9;}
+  100%{transform:translateY(460px);opacity:0;}
+}
+.hero-data-particle{
+  position:absolute;top:0;width:1px;
+  background:linear-gradient(to bottom,rgba(232,70,10,.9),rgba(247,183,49,.4),transparent);
+  border-radius:2px;
+  animation:dataRain 0.6s linear forwards;
+}
+
+/* Static noise flicker */
+@keyframes staticFlicker{
+  0%,100%{opacity:0;}
+  10%{opacity:.15;}
+  20%{opacity:0;}
+  30%{opacity:.1;}
+  50%{opacity:.08;}
+  70%{opacity:.12;}
+  90%{opacity:0;}
+}
+.hero-static{
+  position:absolute;inset:0;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+  background-size:180px 180px;
+  mix-blend-mode:overlay;
+  animation:staticFlicker 0.7s steps(3) forwards;
+}
+
+/* Hero nav controls */
+.hero-nav-btn{
+  position:absolute;top:50%;transform:translateY(-50%);
+  z-index:20;width:40px;height:40px;border-radius:50%;
+  background:rgba(8,11,15,.7);backdrop-filter:blur(10px);
+  border:1px solid rgba(232,70,10,.3);color:rgba(255,255,255,.8);
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;font-size:1.1rem;font-weight:300;
+  transition:all .2s;box-shadow:0 0 0 0 rgba(232,70,10,0);
+  line-height:1;font-family:system-ui,sans-serif;
+}
+.hero-nav-btn:hover{
+  background:rgba(232,70,10,.8);border-color:var(--accent);
+  color:#fff;transform:translateY(-50%) scale(1.1);
+  box-shadow:0 0 20px rgba(232,70,10,.4),0 0 0 1px rgba(232,70,10,.5);
+}
+.hero-nav-prev{left:.85rem;}
+.hero-nav-next{right:.85rem;}
+
+/* Dot indicators */
+.hero-indicators{
+  position:absolute;bottom:12px;left:50%;transform:translateX(-50%);
+  display:flex;align-items:center;gap:5px;z-index:20;
+}
+.hero-dot{
+  width:6px;height:6px;border-radius:50%;
+  background:rgba(255,255,255,.22);cursor:pointer;
+  transition:all .3s cubic-bezier(.4,0,.2,1);
+  border:none;padding:0;
+}
+.hero-dot.active{
+  width:22px;border-radius:3px;
+  background:var(--accent);
+  box-shadow:0 0 8px rgba(232,70,10,.6);
+}
+
+/* Cycle progress bar */
+.hero-cycle-bar-wrap{
+  position:absolute;bottom:0;left:0;right:0;z-index:20;
+  height:2px;background:rgba(255,255,255,.06);
+}
+.hero-cycle-bar-fill{
+  height:100%;width:0%;
+  background:linear-gradient(90deg,var(--accent),var(--zap));
+  box-shadow:0 0 8px rgba(232,70,10,.5);
+  transition:width linear;
+}
+
+/* Hero player inner */
+.hero-player{position:absolute;left:4%;top:50%;transform:translateY(-50%);width:54%;aspect-ratio:16/9;border-radius:12px;overflow:hidden;background:#000;border:1px solid rgba(255,255,255,.07);box-shadow:0 24px 80px rgba(0,0,0,.8);z-index:5;}
+.hero-player video{width:100%;height:100%;object-fit:cover;display:block;}
+.hero-player-bg{width:100%;height:100%;background:linear-gradient(135deg,#0d1e30,#1a0a00,#080d18);}
+
+/* Stream card thumbnails */
+.ct-thumb{width:100%;height:100%;object-fit:cover;display:block;}
+.ct-thumb-wrap{position:relative;width:100%;height:100%;background:#0a0f18;overflow:hidden;}
 </style>
 </head>
 <body>
@@ -874,30 +1119,53 @@ footer p{font-size:.72rem;color:var(--muted);}
 
 <!-- ========= HOME PAGE ========= -->
 <div class="page active" id="homePage">
-  <div class="hero-stream" onclick="showVideoPage()">
+  <div class="hero-stream" id="heroStream">
     <div class="hero-bg"></div>
     <div class="hero-grid-ov"></div>
-    <div class="hero-player">
-      <div class="stream-visual" style="background:linear-gradient(135deg,#0d1e30,#1a0a00,#080d18)"></div>
-      <div class="play-ov"><div class="play-btn-big"></div></div>
+
+    <!-- Sci-fi transition overlay -->
+    <div class="hero-transition-ov" id="heroTransitionOv">
+      <div class="hero-scan-line" id="heroScanLine" style="display:none"></div>
+      <div class="hero-glitch-a" id="heroGlitchA" style="display:none"></div>
+      <div class="hero-glitch-b" id="heroGlitchB" style="display:none"></div>
+      <div class="hero-grid-flash" id="heroGridFlash" style="display:none"></div>
+      <div class="hero-static" id="heroStatic" style="display:none"></div>
     </div>
+
+    <!-- Prev / Next -->
+    <button class="hero-nav-btn hero-nav-prev" id="heroPrevBtn" onclick="event.stopPropagation();heroNav(-1)">&#8249;</button>
+    <button class="hero-nav-btn hero-nav-next" id="heroNextBtn" onclick="event.stopPropagation();heroNav(1)">&#8250;</button>
+
+    <!-- Dot indicators -->
+    <div class="hero-indicators" id="heroIndicators"></div>
+
+    <!-- Cycle progress bar -->
+    <div class="hero-cycle-bar-wrap"><div class="hero-cycle-bar-fill" id="heroCycleBarFill"></div></div>
+
+    <!-- Player -->
+    <div class="hero-player" id="heroPlayer">
+      <div class="hero-player-bg" id="heroPlayerBg"></div>
+      <div class="play-ov" id="heroPlayOv"><div class="play-btn-big">&#9654;</div></div>
+    </div>
+
+    <!-- Info panel -->
     <div class="hero-info">
-      <div class="hero-live-badge"><span class="live-dot"></span>LIVE</div>
-      <div class="hero-title">Indie Jazz Live - No Platform, No Rules</div>
+      <div class="hero-live-badge"><span class="live-dot"></span><span id="heroStatusLabel">LIVE</span></div>
+      <div class="hero-title" id="heroTitle">Connecting to relays…</div>
       <div class="hero-host">
-        <div class="hero-av"></div>
-        <span style="font-weight:600;color:var(--text)">wavesound</span>
-        <span class="nip05-badge" title="NIP-05: wave@bitcoin-cats.ca"></span>
+        <div class="hero-av" id="heroAv"></div>
+        <span style="font-weight:600;color:var(--text)" id="heroHostName">—</span>
+        <span class="nip05-badge" id="heroNip05" style="display:none">&#10003;</span>
       </div>
-      <div class="hero-summary">Live jazz set from my home studio. No YouTube, no Spotify - pure music on Nostr.</div>
+      <div class="hero-summary" id="heroSummary">Finding live streams on Nostr…</div>
       <div class="hero-stats">
-        <div class="h-stat"><div class="val">2,105</div><div class="lbl">watching</div></div>
-        <div class="h-stat zap"><div class="val">88,800</div><div class="lbl">sats</div></div>
-        <div class="h-stat"><div class="val">1h 24m</div><div class="lbl">live</div></div>
+        <div class="h-stat"><div class="val" id="heroViewers">—</div><div class="lbl">watching</div></div>
+        <div class="h-stat zap"><div class="val" id="heroSats">—</div><div class="lbl">sats</div></div>
+        <div class="h-stat"><div class="val" id="heroTime">—</div><div class="lbl">live</div></div>
       </div>
       <div class="hero-actions">
-        <button class="btn btn-primary" onclick="event.stopPropagation();showVideoPage()">Watch</button>
-        <button class="btn btn-zap" onclick="event.stopPropagation()">Zap</button>
+        <button class="btn btn-primary" id="heroWatchBtn" onclick="event.stopPropagation();heroWatchCurrent()">Watch</button>
+        <button class="btn btn-zap" onclick="event.stopPropagation()">&#9889; Zap</button>
       </div>
     </div>
   </div>
@@ -915,37 +1183,55 @@ footer p{font-size:.72rem;color:var(--muted);}
     <button class="cat-chip">IRL</button>
   </div>
 
-  <div class="home-layout">
-    <div class="left-sidebar">
-      <div class="sb-sec">
-        <span class="sb-label">Following Live</span><div id="followingLiveList">
-        <div class="sb-link sb-live" onclick="showVideoPage()"><span class="live-ind"></span><div class="sb-av"></div><span>wavesound</span></div>
-        <div class="sb-link sb-live"><span class="live-ind"></span><div class="sb-av"></div><span>fiatjaf</span></div>
-        <div class="sb-link sb-live"><span class="live-ind"></span><div class="sb-av"></div><span>jack</span></div></div>
-      </div>
-      <div class="sb-sec">
-        <span class="sb-label">Recommended</span>
-        <div class="sb-link"><div class="sb-av"></div><span>nostrdev</span></div>
-        <div class="sb-link"><div class="sb-av"></div><span>stacksats</span></div>
-        <div class="sb-link"><div class="sb-av"></div><span>satsoshi99</span></div>
-        <div class="sb-link" style="color:var(--muted);font-size:.74rem;margin-top:.1rem;">Browse all</div>
+  <div class="stream-main">
+    <!-- Live Now header with list filter -->
+    <div class="live-now-hd">
+      <h2>Live Now</h2>
+      <span class="live-count-pill" id="liveCountPill"></span>
+
+      <!-- List filter dropdown (moved here from Following Live) -->
+      <div class="list-filter-wrap" id="listFilterWrap">
+        <button class="list-filter-btn" id="listFilterBtn" onclick="toggleListFilterDD(event)">
+          <span class="list-filter-btn-label" id="listFilterLabel">All Live</span>
+          <span class="list-filter-caret">&#9660;</span>
+        </button>
+        <div class="list-filter-dd" id="listFilterDD">
+          <span class="lf-section-label">View</span>
+          <button class="lf-item active" id="lf-all" onclick="setListFilter('all',this)">
+            <span class="lf-dot"></span>
+            <span class="lf-item-name">All Live</span>
+          </button>
+          <button class="lf-item" id="lf-following" onclick="setListFilter('following',this)">
+            <span class="lf-dot"></span>
+            <span class="lf-item-name">My Following</span>
+            <span class="lf-item-count" id="lfFollowingCount"></span>
+          </button>
+          <div id="lf-nip51-section" style="display:none">
+            <div class="lf-sep"></div>
+            <span class="lf-section-label">My NIP-51 Lists</span>
+            <div id="lf-nip51-items"></div>
+          </div>
+          <div id="lf-saved-section" style="display:none">
+            <div class="lf-sep"></div>
+            <span class="lf-section-label">Saved Lists</span>
+            <div id="lf-saved-items"></div>
+          </div>
+          <div class="lf-sep"></div>
+          <span class="lf-section-label">Add Curated List</span>
+          <div class="lf-add-row">
+            <input class="lf-add-input" id="lfAddInput" placeholder="naddr1… or listr.lol URL" oninput="lfAddInputChange(this)">
+            <button class="lf-add-btn" onclick="lfAddList()">Add</button>
+          </div>
+          <div class="lf-add-hint">Paste a Liststr URL or NIP-51 naddr to load a curated list of streamers.</div>
+        </div>
       </div>
     </div>
-    <div class="stream-main">
-      <div class="sec-hd"><h2>Live Now</h2><span class="see-all">See all (24)</span></div>
-      <div class="grid-4" id="liveGrid"><div class="stream-card" onclick="showVideoPage()"><div class="ct"><div class="ct-inner"><div class="tc t1"></div></div><div class="cb-live"><span class="live-dot"></span>LIVE</div><div class="cb-viewers">2.1k</div></div><div class="ci"><div class="ci-row"><div class="ci-av"></div><div><div class="ci-title">Indie Jazz Live - No Platform No Rules</div><div class="ci-host">wavesound <span class="nip05-badge" style="font-size:.65rem"></span></div><div class="ci-tags"><span class="tag">Music</span></div></div></div></div></div>
-        <div class="stream-card"><div class="ct"><div class="ct-inner"><div class="tc t2"></div></div><div class="cb-live"><span class="live-dot"></span>LIVE</div><div class="cb-viewers">1.2k</div></div><div class="ci"><div class="ci-row"><div class="ci-av"></div><div><div class="ci-title">Building P2P Relay in Rust Ep. 12</div><div class="ci-host">fiatjaf <span class="nip05-badge" style="font-size:.65rem"></span></div><div class="ci-tags"><span class="tag">Coding</span></div></div></div></div></div>
-        <div class="stream-card"><div class="ct"><div class="ct-inner"><div class="tc t3"></div></div><div class="cb-live"><span class="live-dot"></span>LIVE</div><div class="cb-viewers">892</div></div><div class="ci"><div class="ci-row"><div class="ci-av"></div><div><div class="ci-title">Bitcoin AMA - Lightning Deep Dive</div><div class="ci-host">jack</div><div class="ci-tags"><span class="tag">Bitcoin</span></div></div></div></div></div>
-        <div class="stream-card"><div class="ct"><div class="ct-inner"><div class="tc t4"></div></div><div class="cb-live" style="background:var(--purple)">SOON</div></div><div class="ci"><div class="ci-row"><div class="ci-av"></div><div><div class="ci-title">Sovereign Tech Talk Podcast Ep. 44</div><div class="ci-host">stacksats - Starts 8PM UTC</div><div class="ci-tags"><span class="tag">Podcast</span></div></div></div></div></div>
-      </div>
-      <div class="sec-hd"><h2>Popular This Week</h2><span class="see-all">See all</span></div>
-      <div class="grid-4">
-        <div class="stream-card"><div class="ct"><div class="ct-inner"><div class="tc t5"></div></div><div class="cb-viewers">4.2k VOD</div></div><div class="ci"><div class="ci-row"><div class="ci-av"></div><div><div class="ci-title">Marathon Gaming - Permadeath Run</div><div class="ci-host">bitcoingamer</div><div class="ci-tags"><span class="tag">Gaming</span></div></div></div></div></div>
-        <div class="stream-card"><div class="ct"><div class="ct-inner"><div class="tc t6"></div></div><div class="cb-viewers">1.8k VOD</div></div><div class="ci"><div class="ci-row"><div class="ci-av"></div><div><div class="ci-title">Digital Art - Bitcoin Landscapes #3</div><div class="ci-host">pixelsat <span class="nip05-badge" style="font-size:.65rem"></span></div><div class="ci-tags"><span class="tag">Art</span></div></div></div></div></div>
-        <div class="stream-card"><div class="ct"><div class="ct-inner"><div class="tc t7"></div></div><div class="cb-viewers">3.1k VOD</div></div><div class="ci"><div class="ci-row"><div class="ci-av"></div><div><div class="ci-title">Self-Hosting 101 - Your Own Server</div><div class="ci-host">sovereignstack</div><div class="ci-tags"><span class="tag">Tutorial</span></div></div></div></div></div>
-        <div class="stream-card"><div class="ct"><div class="ct-inner"><div class="tc t8"></div></div><div class="cb-viewers">920 VOD</div></div><div class="ci"><div class="ci-row"><div class="ci-av"></div><div><div class="ci-title">Open Mic Night - Uncensored Comedy</div><div class="ci-host">relay.run</div><div class="ci-tags"><span class="tag">Comedy</span></div></div></div></div></div>
-      </div>
+
+    <!-- Infinite-scroll grid -->
+    <div class="live-grid" id="liveGrid">
+      <div class="live-grid-loading"><div class="lf-spinner"></div>Syncing streams from relays…</div>
     </div>
+    <div class="live-grid-sentinel" id="liveGridSentinel"></div>
   </div>
   <footer>
     <div class="flogo"><span style="color:var(--zap)"></span>NostrFlux</div>
