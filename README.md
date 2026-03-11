@@ -85,14 +85,6 @@ The goal of the project is to build a **Twitch-style experience powered entirely
 
 # Theater Mode Issues
 
-### Chat
-- Viewer count tab ("Viewers 2.1k") should be removed.
-- Messages posted in chat appear **multiple times from the same user** (while other clients show it once).
-- Chat settings button should be removed.
-
-### Layout
-- Ultra-wide monitor support needs fixing.
-
 ### Buttons Not Working
 The following controls currently do not function correctly:
 
