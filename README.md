@@ -39,158 +39,30 @@ The goal of the project is to build a **Twitch-style experience powered entirely
 
 ---
 
-# Known Issues
+# Known Issues/Bugs/Coming Soon Features:
 
-## General
-- Search bar currently does **not support hashtag searching**.
-- Limited relay connections.
-- Past streams remain in the menu and should be removed.
-- Settings UI layout needs improvement.
+- Search Bar expanded to hash tags
+- More relays connected like damus, zap.stream 
+- Remove Past Streams from menu.
+- Add Groups
+- Add Lists
+- Add Feed 
+- If has nip-05, instead of purple curcle, glowing purple square. 
+- Fix Settings UI so it looks better. nostr profile settings should one box, relays in another well website settings like to change theme, etc. 
 
----
+Profile;
+- If person has badges, split the bio box up into 2 and show badges. When you click on badge, pop up all badge details
+- If you are own your own profile, put a spot above post to let you post your own post. 
+- Add feature to expand on comments of post new a window.
+- Remove the 'emoji' count 
+- Fix post images so they aren't massive.  
+- Fix follow button.
+- When you click share button, it will pop up a window asking how you will want to share for example url link to the profile, share on nostr as a post, send to someone via facebook, twitter, etc. 
+- Fix report button to function
 
-# Profile Issues
+Theader Mode.
+- Fix zap button, fix +Follow, Like and report.
 
-### Layout
-- Profile statistics box does not align properly with the bio section.
-
-### Profile stats should display in this order:
-
-**Top Row**
-- Followers
-- Following
-
-**Second Row**
-- Post Count
-- Stream Count
-
-**Bottom Row**
-- Time on Nostr
-- Total Sats Received
-
-### Additional Profile Issues
-- Videos tab and Photos tab should be merged into one **Media** tab.
-- Images inside posts are currently **too large**.
-- Video URLs inside posts **do not autoplay or render correctly**.
-- Follow button functionality is inconsistent.
-- Emoji count display should be removed.
-- Report button currently does not function.
-
-### Missing Interaction Features
-- No **like system** for posts or comments.
-- Comments cannot expand into a dedicated view.
-- Users cannot easily create a post from their own profile page.
-
----
-
-# Theater Mode Issues
-
-### Buttons Not Working
-The following controls currently do not function correctly:
-
-- Zap
-- Follow
-- Like
-- Report
-
-### Stream Discovery
-- **Live Now** functionality is currently broken.
-
----
-
-# Planned Features
-
-## Search
-- Expand search bar to support **hashtags**.
-
-## Relay Improvements
-Add more relay connections such as:
-
-- `damus`
-- `zap.stream`
-- additional high-availability relays
-
----
-
-## Social Features
-
-### Groups
-Ability to create and join **Nostr Groups**.
-
-### Lists
-User-created **curated lists of profiles**.
-
-### Feed
-A unified **content feed** showing posts from followed users.
-
----
-
-## Profile Enhancements
-
-### NIP-05 Identity Indicator
-Profiles with verified **NIP-05 identifiers** will display:
-
-- A **glowing purple square** instead of the default purple circle.
-
-### Badges
-If a user has badges:
-
-- Bio section splits into two panels.
-- Badges display in a dedicated area.
-- Clicking a badge opens a **popup with full badge details**.
-
-### Profile Posting
-If viewing **your own profile**:
-
-- A post composer appears above the posts feed.
-
----
-
-## Share Improvements
-
-Clicking the **Share button** will open a dialog offering:
-
-- Copy profile URL
-- Share as a Nostr post
-- Send via social media platforms
-  - Facebook
-  - Twitter
-  - others
-
----
-
-## Settings Improvements
-
-Settings will be separated into **three distinct sections**:
-
-### 1. Nostr Profile
-- Display name
-- Bio
-- Picture
-- NIP-05
-
-### 2. Relays
-- Add/remove relays
-- Relay status indicators
-
-### 3. Website Settings
-- Theme selection
-- UI preferences
-- Client behavior settings
-
----
-
-# Development Goals
-
-The long-term goal of **NostrLiveStream** is to provide:
-
-- Fully decentralized livestreaming
-- Native Nostr chat
-- Lightning zap support
-- Identity tied to Nostr keys
-- Open and censorship-resistant streaming infrastructure
-
----
 
 # Status
 
