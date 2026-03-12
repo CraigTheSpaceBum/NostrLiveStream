@@ -446,14 +446,14 @@
   }
 
   function renderSettingsRelayList() {
-    const wrap = qs('#settingsRelayList');
+    const wrap = qs('#settingsRelayList2') || qs('#settingsRelayList');
     if (!wrap) return;
     wrap.innerHTML = '';
 
     state.settings.relays.forEach((relay) => {
       const tag = document.createElement('div');
       tag.className = 'relay-tag';
-      tag.innerHTML = `${relay} <button class="rem" title="Remove">x</button>`;
+      tag.innerHTML = `${relay} <button class="rem" title="Remove">✕</button>`;
       const btn = qs('.rem', tag);
       if (btn) btn.addEventListener('click', () => removeRelayFromSettings(relay));
       wrap.appendChild(tag);
@@ -491,11 +491,23 @@
     const lud16 = qs('#settingsLud16Input');
     const web = qs('#settingsWebsiteInput');
     const banner = qs('#settingsBannerInput');
+    const displayName = qs('#settingsDisplayName');
+    const username = qs('#settingsUsername');
+    const about = qs('#settingsAbout');
+    const avatarUrl = qs('#settingsAvatarUrl');
+    const nip05 = qs('#settingsNip05Input');
 
     const up = state.user ? profileFor(state.user.pubkey) : null;
     if (lud16) lud16.value = (up && up.lud16) || state.settings.lud16 || '';
     if (web) web.value = (up && up.website) || state.settings.website || '';
     if (banner) banner.value = (up && up.banner) || state.settings.banner || '';
+    if (displayName) displayName.value = (up && (up.display_name || up.name)) || '';
+    if (username) username.value = (up && up.name) || '';
+    if (about) about.value = (up && up.about) || '';
+    if (avatarUrl) avatarUrl.value = (up && up.picture) || '';
+    if (nip05) nip05.value = (up && up.nip05) || '';
+
+    if (up && up.picture) previewSettingsAvatar(up.picture);
 
     setToggleById('setAutoPublishToggle', state.settings.autoPublish);
     setToggleById('setMiniPlayerToggle', state.settings.miniPlayer);
@@ -1147,7 +1159,10 @@
       </div>`;
 
     const avEl = qs('.ci-av', card);
-    if (avEl) setAvatarEl(avEl, p.picture || '', pickAvatar(stream.pubkey));
+    if (avEl) {
+      setAvatarEl(avEl, p.picture || '', pickAvatar(stream.pubkey));
+      if (p.nip05) avEl.classList.add('nip05-square');
+    }
     qs('.ci-title', card).textContent = stream.title;
     qs('.ci-host', card).textContent = p.nip05 || p.name;
     card.addEventListener('click', () => openStream(stream.address));
@@ -1737,58 +1752,181 @@
     btn.classList.toggle('following-active', !!isFollowing);
   }
 
+  // Debounce timer for relay search
+  let _searchRelaySubId = null;
+  let _searchDebounceTimer = null;
+
+  function buildSearchProfileItem(p, box) {
+    const item = document.createElement('div');
+    item.className = 'sr-item';
+    const hasNip05 = !!(p.nip05 || '').trim();
+    const avClass = hasNip05 ? 'sr-av nip05-square' : 'sr-av';
+    item.innerHTML = `<div class="${avClass}"></div><div><div class="sr-title"></div><div class="sr-sub"></div></div>`;
+    setAvatarEl(qs('.sr-av', item), p.picture || '', pickAvatar(p.pubkey));
+    qs('.sr-title', item).textContent = p.name;
+    qs('.sr-sub', item).textContent = p.nip05 || shortHex(p.pubkey);
+    item.addEventListener('click', () => {
+      showProfileByPubkey(p.pubkey);
+      box.classList.remove('open');
+    });
+    return item;
+  }
+
   function renderSearch(term) {
     const box = qs('#searchResults');
     if (!box) return;
+
+    // Cancel any in-flight relay search
+    if (_searchDebounceTimer) { clearTimeout(_searchDebounceTimer); _searchDebounceTimer = null; }
+    if (_searchRelaySubId && state.pool) {
+      try { state.pool.unsubscribe(_searchRelaySubId); } catch (_) {}
+      _searchRelaySubId = null;
+    }
+
     if (!term) {
       box.classList.remove('open');
       return;
     }
 
     const streams = sortedLiveStreams().filter((s) => s.title.toLowerCase().includes(term) || profileFor(s.pubkey).name.toLowerCase().includes(term)).slice(0, 5);
-    const profiles = Array.from(state.profilesByPubkey.values()).filter((p) => (p.name || '').toLowerCase().includes(term) || (p.nip05 || '').toLowerCase().includes(term)).slice(0, 5);
 
-    box.innerHTML = '';
+    // Local cache match — all cached profiles, not just streamers
+    const localProfiles = Array.from(state.profilesByPubkey.values()).filter((p) => {
+      const t = term.toLowerCase();
+      return (p.name || '').toLowerCase().includes(t) ||
+             (p.nip05 || '').toLowerCase().includes(t) ||
+             (p.pubkey || '').toLowerCase().startsWith(t);
+    }).slice(0, 8);
 
-    const streamLabel = document.createElement('span');
-    streamLabel.className = 'sr-label';
-    streamLabel.textContent = 'Streams';
-    box.appendChild(streamLabel);
+    function rebuildBox(extraProfiles) {
+      box.innerHTML = '';
 
-    streams.forEach((s) => {
-      const p = profileFor(s.pubkey);
-      const item = document.createElement('div');
-      item.className = 'sr-item';
-      item.innerHTML = `<div class="sr-av rect">L</div><div><div class="sr-title"></div><div class="sr-sub"></div></div><span class="sr-live">LIVE</span>`;
-      qs('.sr-title', item).textContent = s.title;
-      qs('.sr-sub', item).textContent = p.name;
-      item.addEventListener('click', () => {
-        openStream(s.address);
-        box.classList.remove('open');
+      // --- Streams ---
+      if (streams.length) {
+        const streamLabel = document.createElement('span');
+        streamLabel.className = 'sr-label';
+        streamLabel.textContent = 'Live Streams';
+        box.appendChild(streamLabel);
+
+        streams.forEach((s) => {
+          const p = profileFor(s.pubkey);
+          const item = document.createElement('div');
+          item.className = 'sr-item';
+          item.innerHTML = `<div class="sr-av rect">L</div><div><div class="sr-title"></div><div class="sr-sub"></div></div><span class="sr-live">LIVE</span>`;
+          qs('.sr-title', item).textContent = s.title;
+          qs('.sr-sub', item).textContent = p.name;
+          item.addEventListener('click', () => { openStream(s.address); box.classList.remove('open'); });
+          box.appendChild(item);
+        });
+
+        const sep = document.createElement('div'); sep.className = 'dd-sep'; box.appendChild(sep);
+      }
+
+      // Merge local + extra, de-dupe by pubkey
+      const seen = new Set();
+      const merged = [];
+      [...localProfiles, ...extraProfiles].forEach((p) => {
+        if (!seen.has(p.pubkey)) { seen.add(p.pubkey); merged.push(p); }
       });
-      box.appendChild(item);
-    });
 
-    const userLabel = document.createElement('span');
-    userLabel.className = 'sr-label';
-    userLabel.textContent = 'Users';
-    box.appendChild(userLabel);
+      // --- Users ---
+      const userLabel = document.createElement('span');
+      userLabel.className = 'sr-label';
+      userLabel.textContent = merged.length ? 'Users' : 'Searching Nostr…';
+      box.appendChild(userLabel);
 
-    profiles.forEach((p) => {
-      const item = document.createElement('div');
-      item.className = 'sr-item';
-      item.innerHTML = `<div class="sr-av"></div><div><div class="sr-title"></div><div class="sr-sub"></div></div>`;
-      setAvatarEl(qs('.sr-av', item), p.picture || '', pickAvatar(p.pubkey));
-      qs('.sr-title', item).textContent = p.name;
-      qs('.sr-sub', item).textContent = p.nip05 || shortHex(p.pubkey);
-      item.addEventListener('click', () => {
-        showProfileByPubkey(p.pubkey);
-        box.classList.remove('open');
+      merged.slice(0, 8).forEach((p) => {
+        box.appendChild(buildSearchProfileItem(p, box));
       });
-      box.appendChild(item);
-    });
 
-    box.classList.add('open');
+      box.classList.add('open');
+    }
+
+    rebuildBox([]);
+
+    // --- Relay queries for broad Nostr search ---
+    _searchDebounceTimer = setTimeout(async () => {
+      if (!state.pool) return;
+
+      const extraProfiles = [];
+      const relayResults = new Map(); // pubkey -> event
+
+      // 1. If looks like npub → decode + fetch by pubkey
+      const npubMatch = term.match(/^npub1[023456789acdefghjklmnpqrstuvwxyz]{6,}/i);
+      if (npubMatch) {
+        try {
+          const tools = await ensureNostrTools();
+          const dec = tools.nip19.decode(npubMatch[0].toLowerCase());
+          if (dec && dec.type === 'npub') {
+            const subId = state.pool.subscribe([{ kinds: [KIND_PROFILE], authors: [dec.data], limit: 1 }], {
+              event(ev) {
+                const p = parseProfile(ev);
+                state.profilesByPubkey.set(p.pubkey, p);
+                relayResults.set(p.pubkey, p);
+                rebuildBox(Array.from(relayResults.values()));
+              },
+              eose() {}
+            });
+            _searchRelaySubId = subId;
+          }
+        } catch (_) {}
+        return;
+      }
+
+      // 2. If looks like nip-05 (contains @) → resolve via .well-known
+      if (term.includes('@') && term.split('@').length === 2) {
+        const [localPart, domain] = term.split('@');
+        if (localPart && domain && domain.includes('.')) {
+          try {
+            const resp = await fetch(`https://${domain}/.well-known/nostr.json?name=${encodeURIComponent(localPart)}`);
+            const data = await resp.json();
+            const pubkey = data.names && (data.names[localPart] || data.names[localPart.toLowerCase()]);
+            if (pubkey && /^[0-9a-f]{64}$/i.test(pubkey)) {
+              const subId = state.pool.subscribe([{ kinds: [KIND_PROFILE], authors: [pubkey], limit: 1 }], {
+                event(ev) {
+                  const p = parseProfile(ev);
+                  state.profilesByPubkey.set(p.pubkey, p);
+                  relayResults.set(p.pubkey, p);
+                  rebuildBox(Array.from(relayResults.values()));
+                },
+                eose() {}
+              });
+              _searchRelaySubId = subId;
+            }
+          } catch (_) {}
+          return;
+        }
+      }
+
+      // 3. General text search — use NIP-50 search filter (supported by many relays)
+      //    Also fetch recent kind:0 events and filter locally
+      const filters = [];
+      if (term.length >= 2) {
+        filters.push({ kinds: [KIND_PROFILE], search: term, limit: 20 });
+      }
+
+      if (filters.length) {
+        const subId = state.pool.subscribe(filters, {
+          event(ev) {
+            if (relayResults.has(ev.pubkey)) {
+              if ((relayResults.get(ev.pubkey).created_at || 0) >= (ev.created_at || 0)) return;
+            }
+            const p = parseProfile(ev);
+            state.profilesByPubkey.set(p.pubkey, p);
+            const t = term.toLowerCase();
+            const matches = (p.name || '').toLowerCase().includes(t) ||
+                            (p.nip05 || '').toLowerCase().includes(t) ||
+                            (p.pubkey || '').toLowerCase().startsWith(t);
+            if (matches) {
+              relayResults.set(p.pubkey, p);
+              rebuildBox(Array.from(relayResults.values()));
+            }
+          },
+          eose() {}
+        });
+        _searchRelaySubId = subId;
+      }
+    }, 350);
   }
 
   function renderChatMessage(ev) {
@@ -1841,6 +1979,10 @@
     if (navBadge) navBadge.style.display = p.nip05 ? 'inline' : 'none';
     if (pdBadge) pdBadge.style.display = p.nip05 ? 'inline' : 'none';
 
+    // Apply NIP-05 square glow to nav/dropdown avatars
+    if (navAvatar) navAvatar.classList.toggle('nip05-square', !!p.nip05);
+    if (pdAv) pdAv.classList.toggle('nip05-square', !!p.nip05);
+
     // Load user's contact list + NIP-51 people lists for the filter dropdown
     subscribeUserLists(state.user.pubkey);
     renderFollowingCount();
@@ -1866,6 +2008,25 @@
         }
       }
     );
+  }
+
+  // Fetch a single profile on demand (commenters, repost authors, etc.)
+  function fetchProfileIfNeeded(pubkey) {
+    if (!pubkey) return Promise.resolve();
+    const existing = state.profilesByPubkey.get(pubkey);
+    if (existing && (existing.name || existing.display_name || existing.picture)) return Promise.resolve();
+    return new Promise((resolve) => {
+      const sub = state.pool.subscribe(
+        [{ kinds: [KIND_PROFILE], authors: [pubkey], limit: 1 }],
+        {
+          event: (ev) => {
+            if (ev.kind !== KIND_PROFILE || ev.pubkey !== pubkey) return;
+            state.profilesByPubkey.set(pubkey, parseProfile(ev));
+          },
+          eose: () => { try { state.pool.unsubscribe(sub); } catch (_) {} resolve(); }
+        }
+      );
+    });
   }
 
   function subscribeLive() {
@@ -2211,9 +2372,32 @@
 
     listEl.innerHTML = '';
     notes.slice(0, 50).forEach((note) => {
+      const isRepost = note.kind === 6;
       const item = document.createElement('div');
       item.className = 'profile-feed-item';
-      item.innerHTML = `
+
+      // For reposts, try to parse the original note from content (NIP-18)
+      let originalNote = null;
+      let originalPubkey = null;
+      if (isRepost) {
+        try {
+          if (note.content && note.content.trim().startsWith('{')) {
+            originalNote = JSON.parse(note.content);
+            originalPubkey = originalNote.pubkey;
+          }
+        } catch (_) {}
+        if (!originalPubkey) {
+          const pTag = (note.tags || []).find(t => t[0] === 'p');
+          if (pTag) originalPubkey = pTag[1];
+        }
+      }
+
+      const originalProfile = (isRepost && originalPubkey) ? profileFor(originalPubkey) : null;
+      const boostBanner = isRepost
+        ? `<div class="pf-boost-banner"><span class="pf-boost-icon">🔁</span><span class="pf-boost-label">${profile.display_name || profile.name || 'User'} boosted</span></div>`
+        : '';
+
+      item.innerHTML = `${boostBanner}
         <div class="profile-feed-head">
           <div class="profile-feed-author">
             <div class="profile-feed-av"></div>
@@ -2236,20 +2420,27 @@
           <button class="profile-comment-btn">Comment</button>
         </div>`;
 
-      setAvatarEl(qs('.profile-feed-av', item), profile.picture || '', pickAvatar(note.pubkey));
+      // For reposts show original author; for regular posts show profile author
+      const displayProfile = (isRepost && originalProfile) ? originalProfile : profile;
+      const displayNote = (isRepost && originalNote) ? originalNote : note;
+      const displayPubkey = (isRepost && originalPubkey) ? originalPubkey : note.pubkey;
+
+      const avEl = qs('.profile-feed-av', item);
+      setAvatarEl(avEl, displayProfile.picture || '', pickAvatar(displayPubkey));
+      if (avEl && displayProfile.nip05) avEl.classList.add('nip05-square');
       const nameEl = qs('.profile-feed-name', item);
-      if (nameEl) nameEl.textContent = profile.name;
+      if (nameEl) nameEl.textContent = displayProfile.display_name || displayProfile.name || shortHex(displayPubkey);
       const timeEl = qs('.profile-feed-time', item);
       if (timeEl) timeEl.textContent = `${formatTimeAgo(note.created_at)} ago`;
 
-      const mediaUrls = extractMediaUrlsFromEvent(note);
+      const mediaUrls = extractMediaUrlsFromEvent(displayNote);
       const mediaItems = mediaUrls
         .map((url) => ({ url, kind: classifyMediaUrl(url) }))
         .filter((m) => m.kind && isLikelyUrl(m.url));
-      const text = stripMediaUrlsFromText(note.content || '', mediaUrls);
+      const text = stripMediaUrlsFromText(displayNote.content || '', mediaUrls);
       const textEl = qs('.profile-feed-text', item);
       if (textEl) {
-        textEl.textContent = text || (mediaItems.length ? '' : '[empty note]');
+        textEl.textContent = text || (mediaItems.length ? '' : (isRepost ? '[Reposted content]' : '[empty note]'));
         textEl.style.display = text || !mediaItems.length ? 'block' : 'none';
       }
 
@@ -2291,13 +2482,28 @@
               <div class="profile-comment-meta"><span class="n"></span><span class="t"></span></div>
               <div class="profile-comment-text"></div>
             </div>`;
-          setAvatarEl(qs('.profile-comment-av', row), cp.picture || '', pickAvatar(comment.pubkey));
+          const cAvEl = qs('.profile-comment-av', row);
+          setAvatarEl(cAvEl, cp.picture || '', pickAvatar(comment.pubkey));
+          if (cAvEl && cp.nip05) cAvEl.classList.add('nip05-square');
           const n = qs('.profile-comment-meta .n', row);
-          if (n) n.textContent = cp.name;
+          if (n) n.textContent = cp.display_name || cp.name || shortHex(comment.pubkey);
           const t = qs('.profile-comment-meta .t', row);
           if (t) t.textContent = `${formatTimeAgo(comment.created_at)} ago`;
           const ct = qs('.profile-comment-text', row);
           if (ct) ct.textContent = (comment.content || '').trim() || '[empty comment]';
+
+          // If profile not cached yet, fetch and update row
+          if (!cp.name && !cp.display_name && !cp.picture) {
+            fetchProfileIfNeeded(comment.pubkey).then(() => {
+              const fresh = profileFor(comment.pubkey);
+              if (n) n.textContent = fresh.display_name || fresh.name || shortHex(comment.pubkey);
+              if (cAvEl) {
+                setAvatarEl(cAvEl, fresh.picture || '', pickAvatar(comment.pubkey));
+                cAvEl.classList.toggle('nip05-square', !!fresh.nip05);
+              }
+            }).catch(() => {});
+          }
+
           commentsWrap.appendChild(row);
         });
 
@@ -2322,11 +2528,7 @@
         commentBtn.addEventListener('click', async () => {
           const content = (commentInput.value || '').trim();
           if (!content) return;
-          if (!state.user) {
-            window.openLogin();
-            return;
-          }
-
+          if (!state.user) { window.openLogin(); return; }
           commentBtn.disabled = true;
           const original = commentBtn.textContent;
           commentBtn.textContent = 'Posting...';
@@ -2350,15 +2552,19 @@
       listEl.appendChild(item);
     });
   }
-
   function renderProfileFeed(pubkey) {
     const leftList = qs('#profileFeedList');
     const tabList = qs('#profileFeedListSide');
     const count = qs('#profileFeedCount');
 
     const map = state.profileNotesByPubkey.get(pubkey) || new Map();
+    // Include top-level kind:1 posts AND kind:6 reposts authored by this pubkey (NIP-18)
     const notes = Array.from(map.values())
-      .filter((ev) => isTopLevelProfilePost(ev, pubkey))
+      .filter((ev) => {
+        if (!ev || ev.pubkey !== pubkey) return false;
+        if (ev.kind === 6) return true;
+        return isTopLevelProfilePost(ev, pubkey);
+      })
       .sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
 
     if (count) count.textContent = `${notes.length} notes`;
@@ -2691,32 +2897,37 @@
     bioGrid.classList.add('has-badges');
     grid.innerHTML = '';
 
-    badges.forEach(({ award, definition }) => {
+    const MAX_SHOWN = 9; // 3×3 grid
+
+    function makeBadgeChip(award, definition) {
       const chip = document.createElement('div');
       chip.className = 'profile-badge-chip';
-
       const image = getBadgeDefTag(definition, 'image') || getBadgeDefTag(definition, 'thumb');
       const name = getBadgeDefTag(definition, 'name') || getBadgeDefTag(definition, 'd') || '🏅';
       const desc = getBadgeDefTag(definition, 'description');
-
       if (image && isLikelyUrl(image)) {
         const img = document.createElement('img');
-        img.src = image;
-        img.alt = name;
-        img.loading = 'lazy';
+        img.src = image; img.alt = name; img.loading = 'lazy';
         img.onerror = () => { chip.textContent = '🏅'; };
         chip.appendChild(img);
-      } else {
-        chip.textContent = '🏅';
-      }
-
+      } else { chip.textContent = '🏅'; }
       chip.title = name;
-      chip.addEventListener('click', () => {
-        openBadgePopup({ name, desc, image, definition, award });
-      });
+      chip.addEventListener('click', () => { openBadgePopup({ name, desc, image, definition, award }); });
+      return chip;
+    }
 
-      grid.appendChild(chip);
+    badges.slice(0, MAX_SHOWN).forEach(({ award, definition }) => {
+      grid.appendChild(makeBadgeChip(award, definition));
     });
+
+    if (badges.length > MAX_SHOWN) {
+      const more = document.createElement('div');
+      more.className = 'badge-see-more';
+      more.textContent = `+${badges.length - MAX_SHOWN}`;
+      more.title = 'See all badges';
+      more.addEventListener('click', () => openAllBadgesPopup(badges));
+      grid.appendChild(more);
+    }
   }
 
   function subscribeProfileStats(pubkey) {
@@ -3102,7 +3313,7 @@
 
     const payload = {
       name: profileData.name || shortHex(state.user.pubkey),
-      display_name: profileData.name || shortHex(state.user.pubkey),
+      display_name: profileData.display_name || profileData.name || shortHex(state.user.pubkey),
       about: profileData.about || '',
       picture: profileData.picture || '',
       banner: profileData.banner || '',
@@ -3116,12 +3327,14 @@
     const merged = {
       ...profileFor(state.user.pubkey),
       pubkey: state.user.pubkey,
-      name: payload.display_name,
+      name: payload.name,
+      display_name: payload.display_name,
       about: payload.about,
       picture: payload.picture,
       banner: payload.banner,
       website: payload.website,
-      lud16: payload.lud16
+      lud16: payload.lud16,
+      nip05: payload.nip05
     };
 
     state.profilesByPubkey.set(state.user.pubkey, merged);
@@ -4007,10 +4220,31 @@
     window.openSettings = function () {
       populateSettingsModal();
       qs('#settingsModal').classList.add('open');
+      // Reset to profile tab each time
+      window.switchSettingsTab('profile');
     };
 
     window.closeSettings = function () {
       qs('#settingsModal').classList.remove('open');
+    };
+
+    window.switchSettingsTab = function (tab) {
+      ['profile','relays','app'].forEach(t => {
+        const btn = qs(`#smTab-${t}`);
+        const panel = qs(`#smPanel${t.charAt(0).toUpperCase()+t.slice(1)}`);
+        if (btn) btn.classList.toggle('active', t === tab);
+        if (panel) panel.classList.toggle('active', t === tab);
+      });
+    };
+
+    window.previewSettingsAvatar = function (url) {
+      const preview = qs('#smAvatarPreview');
+      if (!preview) return;
+      if (url && url.trim()) {
+        preview.innerHTML = `<img src="${url.trim()}" alt="avatar" onerror="this.parentElement.innerHTML='?'">`;
+      } else {
+        preview.innerHTML = '?';
+      }
     };
 
     window.toggleSetting = function (el) {
@@ -4029,6 +4263,54 @@
       }
     };
 
+    // Save just the Nostr profile (NIP-01 kind:0)
+    window.saveProfileSettings = async function () {
+      try {
+        if (!state.user) { alert('Please sign in first.'); return; }
+        const displayName = (qs('#settingsDisplayName') || {}).value || '';
+        const username = (qs('#settingsUsername') || {}).value || '';
+        const about = (qs('#settingsAbout') || {}).value || '';
+        const picture = (qs('#settingsAvatarUrl') || {}).value || '';
+        const banner = (qs('#settingsBannerInput') || {}).value || '';
+        const website = (qs('#settingsWebsiteInput') || {}).value || '';
+        const lud16 = (qs('#settingsLud16Input') || {}).value || '';
+        const nip05 = (qs('#settingsNip05Input') || {}).value || '';
+
+        await publishUserProfile({ name: username || displayName, display_name: displayName, about, picture, banner, website, lud16, nip05 });
+
+        state.settings.lud16 = lud16;
+        state.settings.website = website;
+        state.settings.banner = banner;
+        persistSettings();
+        window.closeSettings();
+      } catch (err) {
+        alert(err.message || 'Failed to save profile.');
+      }
+    };
+
+    // Save relay settings only
+    window.saveRelaySettings = function () {
+      try {
+        const next = { ...state.settings, relays: [...state.settings.relays] };
+        applySettings(next, { reconnect: true });
+        window.closeSettings();
+      } catch (err) {
+        alert(err.message || 'Failed to save relays.');
+      }
+    };
+
+    // Save app/interface settings only
+    window.saveAppSettings = function () {
+      try {
+        const next = collectSettingsFromModal();
+        applySettings(next, { reconnect: false });
+        window.closeSettings();
+      } catch (err) {
+        alert(err.message || 'Failed to save settings.');
+      }
+    };
+
+    // Legacy save — kept for external references
     window.saveSettings = async function () {
       try {
         const next = collectSettingsFromModal();
@@ -4272,6 +4554,37 @@
       if (ov) ov.classList.remove('open');
     };
 
+    // ---- All Badges popup ----
+    window.openAllBadgesPopup = function (badges) {
+      const ov = qs('#allBadgesPopupOv');
+      const grid = qs('#allBadgesGrid');
+      if (!ov || !grid) return;
+      grid.innerHTML = '';
+      badges.forEach(({ award, definition }) => {
+        const chip = document.createElement('div');
+        chip.className = 'profile-badge-chip';
+        const image = getBadgeDefTag(definition, 'image') || getBadgeDefTag(definition, 'thumb');
+        const name = getBadgeDefTag(definition, 'name') || getBadgeDefTag(definition, 'd') || '🏅';
+        const desc = getBadgeDefTag(definition, 'description');
+        if (image && isLikelyUrl(image)) {
+          const img = document.createElement('img');
+          img.src = image; img.alt = name; img.loading = 'lazy';
+          img.onerror = () => { chip.textContent = '🏅'; };
+          chip.appendChild(img);
+        } else { chip.textContent = '🏅'; }
+        chip.title = name;
+        chip.addEventListener('click', () => { openBadgePopup({ name, desc, image, definition, award }); });
+        grid.appendChild(chip);
+      });
+      ov.classList.add('open');
+    };
+
+    window.closeAllBadgesPopup = function (e) {
+      if (e && e.target !== qs('#allBadgesPopupOv')) return;
+      const ov = qs('#allBadgesPopupOv');
+      if (ov) ov.classList.remove('open');
+    };
+
     // ---- Sign out: clear all data, go home ----
     window.signOut = function () {
       try { localStorage.clear(); } catch (_) {}
@@ -4313,7 +4626,7 @@
       if (!e.target.closest('.logo-wrap') && !e.target.closest('.nav-profile')) window.closeAllDD();
     });
 
-    ['goLiveModal', 'endModal', 'loginModal', 'settingsModal', 'faqModal'].forEach((id) => {
+    ['goLiveModal', 'endModal', 'loginModal', 'faqModal'].forEach((id) => {
       const el = qs(`#${id}`);
       if (!el) return;
       el.addEventListener('click', function (e) {
