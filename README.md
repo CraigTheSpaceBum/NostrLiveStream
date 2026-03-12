@@ -9,50 +9,27 @@ The goal of the project is to build a **Twitch-style experience powered entirely
 
 ---
 
-# Current Working Features
-
-## Core Nostr Integration
-- Login using **Nostr keys (nsec / browser extensions)**.
-- Profile loading from **Nostr metadata events**.
-- Basic **relay connectivity**.
-- Viewing Nostr profiles.
-
-## Profiles
-- Profile page displaying:
-  - Bio
-  - Followers
-  - Following
-  - Post count
-  - Stream count
-- Video and photo content tabs.
-- Ability to view posts from a user.
-
-## Streaming / Theater Mode
-- Stream viewing interface.
-- Chat window integrated with Nostr events.
-- Basic livestream UI layout.
-
-## Social Features
-- Follow button (currently unstable).
-- Share button (UI present but incomplete).
-- Basic chat functionality in livestream chat.
-
----
-
-# Known Issues/Bugs/Coming Soon Features:
-
+Bugs/Features:
 - Search Bar expanded to hash tags
-- More relays connected like damus, zap.stream 
-- Remove Past Streams from menu.
-- Add Groups
-- Add Lists
-- Add Feed 
+- More relays connected
+
+wss://relay.damus.io
+wss://nos.lol
+wss://relay.snort.social
+wss://nostr.wine
+wss://relay.primal.net
+wss://relay.nostr.band
+wss://offchain.pub
+wss://relay.nostr.info
+wss://nostr.bitcoiner.social
+wss://relay.zap.stream
+
+
+
 - If has nip-05, instead of purple curcle, glowing purple square. 
 - Fix Settings UI so it looks better. nostr profile settings should one box, relays in another well website settings like to change theme, etc. 
 
 Profile;
-- If person has badges, split the bio box up into 2 and show badges. When you click on badge, pop up all badge details
-- If you are own your own profile, put a spot above post to let you post your own post. 
 - Add feature to expand on comments of post new a window.
 - Remove the 'emoji' count 
 - Fix post images so they aren't massive.  
@@ -61,8 +38,7 @@ Profile;
 - Fix report button to function
 
 Theader Mode.
-- Fix zap button, fix +Follow, Like and report.
-
+- let people reply, like, zap and boost to chat comments
 
 # Status
 
