@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NostrFlux - Decentralized Live</title>
+<title>Sifaka Live - Decentralized Live</title>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:ital,wght@0,400;0,500;1,400&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -405,6 +405,7 @@ nav {
   box-shadow:0 0 0 1px rgba(155,114,255,.28),0 12px 26px rgba(90,54,144,.24);
 }
 .profile-av-big.nip05-verified{
+  border-radius:8px !important;
   box-shadow:0 0 0 2px rgba(155,114,255,.45),0 0 16px rgba(155,114,255,.35);
   border-color:rgba(155,114,255,.72);
 }
@@ -445,17 +446,19 @@ nav {
 .profile-feed-author{display:flex;align-items:flex-start;gap:.5rem;min-width:0;}
 .profile-feed-av{width:34px;height:34px;border-radius:50%;background:var(--surface3);border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:.82rem;overflow:hidden;}
 .profile-feed-meta{min-width:0;}
-.profile-feed-name{font-weight:700;color:var(--text);font-size:.78rem;line-height:1.2;}
+.profile-feed-name{font-weight:700;color:var(--text);font-size:.78rem;line-height:1.2;cursor:pointer;}
+.profile-feed-name:hover{text-decoration:underline;color:var(--text);}
 .profile-feed-time{font-family:'DM Mono',monospace;font-size:.64rem;color:var(--muted);white-space:nowrap;margin-top:.08rem;}
+.profile-comment-meta .n:hover{text-decoration:underline;}
 .profile-feed-text{font-size:.82rem;color:var(--text2);line-height:1.55;white-space:pre-wrap;word-break:break-word;}
 /* Post media: make smaller in feed */
 /* Post media grid: photos square 3-col, videos 16:9 full-width */
 .profile-feed-media{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.4rem;margin-top:.56rem;}
 .profile-feed-media.one{grid-template-columns:1fr;}
-.profile-feed-photo{border-radius:6px;overflow:hidden;border:1px solid var(--border2);background:#090d12;aspect-ratio:1/1;max-height:110px;}
+.profile-feed-photo{border-radius:6px;overflow:hidden;border:1px solid var(--border2);background:#090d12;aspect-ratio:1/1;max-height:200px;}
 .profile-feed-photo img{width:100%;height:100%;object-fit:cover;display:block;}
-.profile-feed-video{border-radius:6px;overflow:hidden;border:1px solid var(--border2);background:#090d12;grid-column:1/-1;max-height:160px;}
-.profile-feed-video video{width:100%;height:100%;max-height:160px;object-fit:contain;display:block;background:#000;}
+.profile-feed-video{border-radius:6px;overflow:hidden;border:1px solid var(--border2);background:#090d12;grid-column:1/-1;max-height:320px;}
+.profile-feed-video video{width:100%;height:100%;max-height:320px;object-fit:contain;display:block;background:#000;}
 .profile-feed-video a{display:flex;align-items:center;justify-content:center;width:100%;height:100%;min-height:80px;color:var(--zap);font-size:.74rem;text-decoration:none;font-weight:600;padding:.75rem;}
 .profile-feed-stats{display:flex;flex-wrap:wrap;gap:.44rem;margin-top:.55rem;}
 .pfs{padding:.17rem .42rem;border:1px solid var(--border);border-radius:999px;background:rgba(255,255,255,.02);font-size:.66rem;color:var(--text2);font-family:'DM Mono',monospace;}
@@ -595,6 +598,19 @@ nav {
 .pmeta-row span:first-child{font-family:'DM Mono',monospace;color:var(--muted);}
 .pmeta-row code{font-family:'DM Mono',monospace;color:var(--text);font-size:.68rem;word-break:break-all;}
 .pmeta-row a{color:var(--accent);text-decoration:none;word-break:break-all;}
+
+/* ======== INFINITE SCROLL SENTINEL ======== */
+.feed-sentinel{
+  display:flex;align-items:center;justify-content:center;
+  padding:1.1rem .5rem;
+}
+.feed-sentinel-label{
+  font-family:'DM Mono',monospace;font-size:.62rem;
+  color:var(--muted);letter-spacing:.06em;
+  animation:sentinelPulse 1.5s ease-in-out infinite;
+}
+.media-sentinel{padding:.85rem .5rem;}
+@keyframes sentinelPulse{0%,100%{opacity:.4}50%{opacity:1}}
 
 @media (max-width: 1024px){
   .profile-top{grid-template-columns:1fr;}
@@ -1199,6 +1215,63 @@ footer p{font-size:.72rem;color:var(--muted);}
 /* Stream card thumbnails */
 .ct-thumb{width:100%;height:100%;object-fit:cover;display:block;}
 .ct-thumb-wrap{position:relative;width:100%;height:100%;background:#0a0f18;overflow:hidden;}
+
+/* ======== NIP-21 MENTION PILLS (nostr:npub/nprofile) ======== */
+.nostr-mention-pill {
+  display:inline;
+  color:var(--purple);
+  background:rgba(155,114,255,.1);
+  border-radius:4px;
+  padding:.05em .28em;
+  font-weight:600;
+  font-size:.9em;
+  cursor:pointer;
+  transition:background .15s;
+}
+.nostr-mention-pill:hover { background:rgba(155,114,255,.22); text-decoration:underline; }
+
+/* ======== NEVENT EMBEDDED NOTE CARDS (nostr:nevent/note) ======== */
+.nevent-embed-card {
+  display:block;
+  margin:.5rem 0;
+  border:1px solid var(--border2);
+  border-radius:10px;
+  padding:.6rem .85rem;
+  background:var(--surface2);
+  cursor:pointer;
+  font-size:.8rem;
+  color:var(--muted);
+  transition:border-color .15s, background .15s;
+}
+.nevent-embed-card:hover { border-color:var(--purple); background:var(--surface3); }
+.nevent-embed-header {
+  display:flex;
+  align-items:center;
+  gap:.45rem;
+  margin-bottom:.32rem;
+}
+.nevent-embed-av {
+  width:20px;height:20px;border-radius:50%;
+  overflow:hidden;flex-shrink:0;
+  background:var(--surface3);
+  display:flex;align-items:center;justify-content:center;
+  font-size:.6rem;border:1px solid var(--border);
+}
+.nevent-embed-av img{width:100%;height:100%;object-fit:cover;}
+.nevent-embed-name {
+  font-size:.76rem;font-weight:600;color:var(--text);
+}
+.nevent-embed-name:hover { text-decoration:underline; }
+.nevent-embed-time {
+  margin-left:auto;
+  font-size:.65rem;color:var(--muted);
+  font-family:'DM Mono',monospace;
+}
+.nevent-embed-body {
+  font-size:.77rem;color:var(--text2);line-height:1.5;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
+  overflow:hidden;
+}
 </style>
 </head>
 <body>
@@ -1207,7 +1280,7 @@ footer p{font-size:.72rem;color:var(--muted);}
 <nav>
   <!-- Logo (left) -->
   <div class="logo-wrap">
-    <button class="logo" id="logoBtn"><span class="logo-bolt"></span>NostrFlux</button>
+    <button class="logo" id="logoBtn"><span class="logo-bolt"></span>Sifaka Live</button>
     <div class="nav-dropdown" id="logoDropdown">
       <button class="dd-item" onclick="showPage('home');closeAllDD()"><span class="ddi">🔴</span>Live Now <span class="dd-count">24</span></button>
       <button class="dd-item" onclick="closeAllDD()"><span class="ddi">🏘️</span>Communities</button>
@@ -1330,7 +1403,7 @@ footer p{font-size:.72rem;color:var(--muted);}
   <div class="login-modal">
     <button class="lm-close" onclick="closeLogin()">x</button>
     <div class="lm-hd">
-      <div class="lm-logo"><span class="lm-lb"></span>NostrFlux</div>
+      <div class="lm-logo"><span class="lm-lb"></span>Sifaka Live</div>
       <div class="lm-sub">Sign in with your Nostr identity - you own your keys.</div>
     </div>
     <div class="lm-body">
@@ -1350,7 +1423,7 @@ footer p{font-size:.72rem;color:var(--muted);}
         <input class="key-inp" type="password" placeholder="nsec1... (stored locally only)">
         <button class="btn btn-ghost" style="width:100%;justify-content:center;" onclick="loginDemo('keyuser','','npub1key...xyz','')">Sign In with nsec key</button>
       </div>
-      <div class="lm-warn">Entering your private key is less secure. NostrFlux never sends your key to any server.</div>
+      <div class="lm-warn">Entering your private key is less secure. Sifaka Live never sends your key to any server.</div>
       <div class="lm-div"><span>or</span></div>
       <div class="lo" onclick="loginDemo('newnostr')" style="border-color:rgba(0,212,138,.2);">
         <div class="lo-ico new"></div>
@@ -1390,7 +1463,7 @@ footer p{font-size:.72rem;color:var(--muted);}
           </div>
         </div>
         <div class="onboard-warn-box">
-          <strong>&#9888; Never share this key.</strong> Anyone who has it owns your identity forever. NostrFlux never sends it to any server — it lives only in your browser.
+          <strong>&#9888; Never share this key.</strong> Anyone who has it owns your identity forever. Sifaka Live never sends it to any server — it lives only in your browser.
         </div>
       </div>
 
@@ -1456,7 +1529,7 @@ footer p{font-size:.72rem;color:var(--muted);}
       <div class="onboard-footer-row">
         <button class="btn btn-ghost" onclick="onbBackToKey()">&#8592; Back</button>
         <button class="btn btn-ghost" onclick="skipOnboarding()">Skip</button>
-        <button class="btn btn-primary" id="onbSaveBtn" onclick="completeOnboarding()">&#10003; Save &amp; Enter NostrFlux</button>
+        <button class="btn btn-primary" id="onbSaveBtn" onclick="completeOnboarding()">&#10003; Save &amp; Enter Sifaka Live</button>
       </div>
     </div>
 
@@ -1589,11 +1662,11 @@ footer p{font-size:.72rem;color:var(--muted);}
     <button class="mclose" style="position:absolute;top:1rem;right:1rem;" onclick="closeFaq()">x</button>
     <div class="sm-hd"><div class="sm-title">FAQ & Help</div></div>
     <div class="sm-body">
-      <div class="faq-item"><div class="faq-q" onclick="toggleFaq(this)">What is NIP-53 <span class="faq-chevron">+</span></div><div class="faq-a">NIP-53 defines live streaming events on Nostr using <code style="font-family:'DM Mono',monospace;color:var(--purple)">kind:30311</code>. Fill in the Go Live form and NostrFlux broadcasts your stream to relays - any NIP-53 compatible client can discover it.</div></div>
-      <div class="faq-item"><div class="faq-q" onclick="toggleFaq(this)">How do I self-host my stream <span class="faq-chevron">+</span></div><div class="faq-a">Install nginx-rtmp on any VPS ($5/mo). Point OBS to your RTMP endpoint. NostrFlux publishes the HLS URL to Nostr relays. No third-party CDN needed.</div></div>
+      <div class="faq-item"><div class="faq-q" onclick="toggleFaq(this)">What is NIP-53 <span class="faq-chevron">+</span></div><div class="faq-a">NIP-53 defines live streaming events on Nostr using <code style="font-family:'DM Mono',monospace;color:var(--purple)">kind:30311</code>. Fill in the Go Live form and Sifaka Live broadcasts your stream to relays - any NIP-53 compatible client can discover it.</div></div>
+      <div class="faq-item"><div class="faq-q" onclick="toggleFaq(this)">How do I self-host my stream <span class="faq-chevron">+</span></div><div class="faq-a">Install nginx-rtmp on any VPS ($5/mo). Point OBS to your RTMP endpoint. Sifaka Live publishes the HLS URL to Nostr relays. No third-party CDN needed.</div></div>
       <div class="faq-item"><div class="faq-q" onclick="toggleFaq(this)">What is NIP-05 verification <span class="faq-chevron">+</span></div><div class="faq-a">NIP-05 links your npub to a domain (e.g. craig@bitcoin-cats.ca). You host a JSON file at your domain. Verified users get a purple badge in chat and on profiles.</div></div>
       <div class="faq-item"><div class="faq-q" onclick="toggleFaq(this)">How do Zaps work (NIP-57) <span class="faq-chevron">+</span></div><div class="faq-a">Add your Lightning address (lud16) to your NIP-01 profile. Viewers click Zap, their wallet pays a Lightning invoice, and the proof is published as a <code style="font-family:'DM Mono',monospace;color:var(--purple)">kind:9735</code> event in chat.</div></div>
-      <div class="faq-item"><div class="faq-q" onclick="toggleFaq(this)">Which NIPs does NostrFlux support <span class="faq-chevron">+</span></div><div class="faq-a">NIP-01 (profiles), NIP-05 (verification), NIP-07 (browser signing), NIP-25 (reactions/likes), NIP-46 (remote signing), NIP-53 (live streams), NIP-57 (zaps), NIP-65 (relay lists).</div></div>
+      <div class="faq-item"><div class="faq-q" onclick="toggleFaq(this)">Which NIPs does Sifaka Live support <span class="faq-chevron">+</span></div><div class="faq-a">NIP-01 (profiles), NIP-05 (verification), NIP-07 (browser signing), NIP-25 (reactions/likes), NIP-46 (remote signing), NIP-53 (live streams), NIP-57 (zaps), NIP-65 (relay lists).</div></div>
     </div>
   </div>
 </div>
@@ -1702,7 +1775,7 @@ footer p{font-size:.72rem;color:var(--muted);}
     <div class="live-grid-sentinel" id="liveGridSentinel"></div>
   </div>
   <footer>
-    <div class="flogo"><span style="color:var(--zap)"></span>NostrFlux</div>
+    <div class="flogo"><span style="color:var(--zap)"></span>Sifaka Live</div>
     <p>Open source - Censorship resistant - <a href="#" style="color:var(--accent);text-decoration:none">GitHub</a></p>
     <div class="nostr-pill">NIP-53 // kind:30311</div>
   </footer>

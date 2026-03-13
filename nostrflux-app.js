@@ -3,7 +3,8 @@
     'wss://relay.damus.io',
     'wss://nos.lol',
     'wss://relay.snort.social',
-    'wss://nostr.wine'
+    'wss://nostr.wine',
+    'wss://relay.primal.net'
   ];
 
   const KIND_PROFILE = 0;
@@ -714,6 +715,8 @@
       pubkey: ev.pubkey,
       created_at: ev.created_at || 0,
       name: obj.display_name || obj.name || shortHex(ev.pubkey),
+      display_name: obj.display_name || '',
+      username: obj.name || '',
       about: obj.about || '',
       picture: obj.picture || '',
       banner: obj.banner || '',
@@ -1794,6 +1797,8 @@
     const localProfiles = Array.from(state.profilesByPubkey.values()).filter((p) => {
       const t = term.toLowerCase();
       return (p.name || '').toLowerCase().includes(t) ||
+             (p.display_name || '').toLowerCase().includes(t) ||
+             (p.username || '').toLowerCase().includes(t) ||
              (p.nip05 || '').toLowerCase().includes(t) ||
              (p.pubkey || '').toLowerCase().startsWith(t);
     }).slice(0, 8);
@@ -1915,6 +1920,8 @@
             state.profilesByPubkey.set(p.pubkey, p);
             const t = term.toLowerCase();
             const matches = (p.name || '').toLowerCase().includes(t) ||
+                            (p.display_name || '').toLowerCase().includes(t) ||
+                            (p.username || '').toLowerCase().includes(t) ||
                             (p.nip05 || '').toLowerCase().includes(t) ||
                             (p.pubkey || '').toLowerCase().startsWith(t);
             if (matches) {
@@ -1929,19 +1936,179 @@
     }, 350);
   }
 
+  /* =====================================================================
+     NIP-21 CONTENT RENDERING — nostr:npub / nprofile / nevent / note
+     Parses inline nostr: entities per NIP-21 and renders them as:
+     - npub1 / nprofile1 → clickable @mention pill (fetches profile)
+     - nevent1 / note1   → embedded quoted note card (fetches event + author)
+     ===================================================================== */
+
+  function _decodeNostrEntity(entity) {
+    if (!window.NostrTools || !window.NostrTools.nip19) return null;
+    try {
+      const dec = window.NostrTools.nip19.decode(entity);
+      if (!dec) return null;
+      if (dec.type === 'npub')    return { type: 'npub',    pubkey: dec.data };
+      if (dec.type === 'nprofile') return { type: 'nprofile', pubkey: dec.data.pubkey };
+      if (dec.type === 'nevent')  return { type: 'nevent',  eventId: dec.data.id };
+      if (dec.type === 'note')    return { type: 'note',    eventId: dec.data };
+      return null;
+    } catch (_) { return null; }
+  }
+
+  function _fetchEventById(eventId) {
+    return new Promise((resolve) => {
+      if (!eventId || !/^[0-9a-f]{64}$/i.test(eventId)) { resolve(null); return; }
+      let done = false;
+      const finish = (val) => {
+        if (done) return; done = true;
+        try { state.pool.unsubscribe(sub); } catch (_) {}
+        clearTimeout(timer);
+        resolve(val);
+      };
+      const timer = setTimeout(() => finish(null), 6000);
+      const sub = state.pool.subscribe(
+        [{ ids: [eventId], limit: 1 }],
+        {
+          event: (ev) => { if (ev.id === eventId) finish(ev); },
+          eose: () => finish(null)
+        }
+      );
+    });
+  }
+
+  function _buildMentionPill(pubkey) {
+    const pill = document.createElement('span');
+    pill.className = 'nostr-mention-pill';
+    const known = state.profilesByPubkey.has(pubkey);
+    const p = profileFor(pubkey);
+    pill.textContent = '@' + (known ? p.name : shortHex(pubkey));
+    pill.style.cursor = 'pointer';
+    pill.onclick = (e) => { e.stopPropagation(); showProfileByPubkey(pubkey); };
+    if (!known) {
+      fetchProfileIfNeeded(pubkey).then(() => {
+        const fresh = profileFor(pubkey);
+        pill.textContent = '@' + (fresh.name || shortHex(pubkey));
+      }).catch(() => {});
+    }
+    return pill;
+  }
+
+  function _buildNeventCard(entity) {
+    const card = document.createElement('div');
+    card.className = 'nevent-embed-card';
+    card.textContent = 'Loading quoted note…';
+
+    const doLoad = () => {
+      const decoded = _decodeNostrEntity(entity);
+      if (!decoded || !decoded.eventId) { card.textContent = '[could not parse note reference]'; return; }
+      _fetchEventById(decoded.eventId).then((ev) => {
+        if (!ev) { card.textContent = '[note not found on connected relays]'; return; }
+        return fetchProfileIfNeeded(ev.pubkey).then(() => {
+          const p = profileFor(ev.pubkey);
+          card.innerHTML = '';
+
+          const header = document.createElement('div');
+          header.className = 'nevent-embed-header';
+          const av = document.createElement('div');
+          av.className = 'nevent-embed-av';
+          setAvatarEl(av, p.picture || '', pickAvatar(ev.pubkey));
+          const nameSpan = document.createElement('span');
+          nameSpan.className = 'nevent-embed-name';
+          nameSpan.textContent = p.name || shortHex(ev.pubkey);
+          nameSpan.onclick = (e) => { e.stopPropagation(); showProfileByPubkey(ev.pubkey); };
+          const timeSpan = document.createElement('span');
+          timeSpan.className = 'nevent-embed-time';
+          timeSpan.textContent = formatTimeAgo(ev.created_at) + ' ago';
+          header.appendChild(av);
+          header.appendChild(nameSpan);
+          header.appendChild(timeSpan);
+
+          const body = document.createElement('div');
+          body.className = 'nevent-embed-body';
+          const mediaUrls = extractMediaUrlsFromEvent(ev);
+          const previewText = stripMediaUrlsFromText(ev.content || '', mediaUrls);
+          body.textContent = previewText.slice(0, 280) + (previewText.length > 280 ? '…' : '');
+
+          card.appendChild(header);
+          card.appendChild(body);
+          card.onclick = () => showProfileByPubkey(ev.pubkey);
+        });
+      }).catch(() => { card.textContent = '[error loading note]'; });
+    };
+
+    // If NostrTools isn't ready yet, wait for it
+    if (window.NostrTools && window.NostrTools.nip19) {
+      doLoad();
+    } else {
+      ensureNostrTools().then(doLoad).catch(() => { card.textContent = '[error loading note]'; });
+    }
+    return card;
+  }
+
+  // Main content renderer — returns a DocumentFragment safe for appending to DOM
+  function renderNostrContent(text) {
+    const frag = document.createDocumentFragment();
+    if (!text) return frag;
+
+    // NIP-21: nostr:<bech32entity>
+    const RE = /nostr:(npub1[a-zA-Z0-9]+|nprofile1[a-zA-Z0-9]+|nevent1[a-zA-Z0-9]+|note1[a-zA-Z0-9]+)/g;
+    let last = 0;
+    let m;
+    while ((m = RE.exec(text)) !== null) {
+      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      const entity = m[1];
+      if (entity.startsWith('npub1') || entity.startsWith('nprofile1')) {
+        // Decode immediately if NostrTools ready, else async placeholder
+        if (window.NostrTools && window.NostrTools.nip19) {
+          const decoded = _decodeNostrEntity(entity);
+          frag.appendChild(decoded ? _buildMentionPill(decoded.pubkey) : document.createTextNode(m[0]));
+        } else {
+          const pill = document.createElement('span');
+          pill.className = 'nostr-mention-pill';
+          pill.textContent = '@' + entity.slice(0, 12) + '…';
+          frag.appendChild(pill);
+          ensureNostrTools().then(() => {
+            const decoded = _decodeNostrEntity(entity);
+            if (decoded && decoded.pubkey) {
+              pill.textContent = '@' + (profileFor(decoded.pubkey).name || shortHex(decoded.pubkey));
+              pill.onclick = (e) => { e.stopPropagation(); showProfileByPubkey(decoded.pubkey); };
+              fetchProfileIfNeeded(decoded.pubkey).then(() => {
+                pill.textContent = '@' + (profileFor(decoded.pubkey).name || shortHex(decoded.pubkey));
+              }).catch(() => {});
+            }
+          }).catch(() => {});
+        }
+      } else if (entity.startsWith('nevent1') || entity.startsWith('note1')) {
+        frag.appendChild(_buildNeventCard(entity));
+      } else {
+        frag.appendChild(document.createTextNode(m[0]));
+      }
+      last = RE.lastIndex;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    return frag;
+  }
+
+  /* ===================================================================== */
+
   function renderChatMessage(ev) {
     const sc = qs('#chatScroll');
     if (!sc) return;
     const p = profileFor(ev.pubkey);
     const row = document.createElement('div');
     row.className = 'cmsg';
+    row.dataset.pubkey = ev.pubkey;
     row.innerHTML = `<div class="c-av"></div><div class="c-body"><div class="c-name-row"><span class="c-name"></span></div><div class="c-text"></div></div>`;
-    setAvatarEl(qs('.c-av', row), p.picture || '', pickAvatar(ev.pubkey));
-    const name = qs('.c-name', row);
-    name.textContent = p.name;
-    name.onclick = () => showProfileByPubkey(ev.pubkey);
+    const avEl = qs('.c-av', row);
+    setAvatarEl(avEl, p.picture || '', pickAvatar(ev.pubkey));
+    if (p.nip05) avEl.classList.add('nip05-square');
+    avEl.onclick = () => showProfileByPubkey(ev.pubkey);
+    const nameEl = qs('.c-name', row);
+    nameEl.textContent = state.profilesByPubkey.has(ev.pubkey) ? p.name : shortHex(ev.pubkey);
+    nameEl.onclick = () => showProfileByPubkey(ev.pubkey);
     const ctext = qs('.c-text', row);
-    ctext.textContent = ev.content || '';
+    ctext.appendChild(renderNostrContent(ev.content || ''));
     sc.appendChild(row);
     sc.scrollTop = sc.scrollHeight;
     while (sc.children.length > 120) sc.removeChild(sc.firstChild);
@@ -1989,10 +2156,16 @@
   }
 
   function subscribeProfiles(pubkeys) {
-    if (!pubkeys.length) return;
+    // Always ensure the logged-in user's profile is included in every fetch
+    const allKeys = [...pubkeys];
+    if (state.user && state.user.pubkey && !allKeys.includes(state.user.pubkey)) {
+      allKeys.unshift(state.user.pubkey);
+    }
+    const unique = [...new Set(allKeys)];
+    if (!unique.length) return;
     if (state.profileSubId) state.pool.unsubscribe(state.profileSubId);
     state.profileSubId = state.pool.subscribe(
-      [{ kinds: [KIND_PROFILE], authors: [...new Set(pubkeys)], limit: pubkeys.length * 2 }],
+      [{ kinds: [KIND_PROFILE], authors: unique, limit: unique.length * 2 }],
       {
         event: (ev) => {
           if (ev.kind !== KIND_PROFILE) return;
@@ -2061,10 +2234,43 @@
   function subscribeChat(stream) {
     if (!stream) return;
     if (state.chatSubId) state.pool.unsubscribe(state.chatSubId);
+    if (state._chatProfileSubId) { try { state.pool.unsubscribe(state._chatProfileSubId); } catch (_) {} state._chatProfileSubId = null; }
     const sc = qs('#chatScroll');
     if (sc) sc.innerHTML = '';
 
     const seenIds = new Set();
+    const unknownPubkeys = new Set(); // pubkeys seen in chat but not yet in profile cache
+
+    // Called after EOSE and also for each new real-time message
+    function fetchMissingChatProfiles() {
+      if (!unknownPubkeys.size) return;
+      const toFetch = Array.from(unknownPubkeys).filter((pk) => !state.profilesByPubkey.has(pk));
+      unknownPubkeys.clear();
+      if (!toFetch.length) return;
+
+      if (state._chatProfileSubId) { try { state.pool.unsubscribe(state._chatProfileSubId); } catch (_) {} }
+      state._chatProfileSubId = state.pool.subscribe(
+        [{ kinds: [KIND_PROFILE], authors: toFetch, limit: toFetch.length * 2 }],
+        {
+          event: (profileEv) => {
+            if (profileEv.kind !== KIND_PROFILE) return;
+            const p = parseProfile(profileEv);
+            state.profilesByPubkey.set(profileEv.pubkey, p);
+            // Update all chat rows for this pubkey
+            const chatEl = qs('#chatScroll');
+            if (!chatEl) return;
+            chatEl.querySelectorAll(`.cmsg[data-pubkey="${CSS.escape(profileEv.pubkey)}"]`).forEach((row) => {
+              const avEl = row.querySelector('.c-av');
+              const nameEl = row.querySelector('.c-name');
+              if (avEl) { setAvatarEl(avEl, p.picture || '', pickAvatar(profileEv.pubkey)); avEl.classList.toggle('nip05-square', !!p.nip05); }
+              if (nameEl) nameEl.textContent = p.name || shortHex(profileEv.pubkey);
+            });
+          },
+          eose: () => { try { state.pool.unsubscribe(state._chatProfileSubId); } catch (_) {} state._chatProfileSubId = null; }
+        }
+      );
+    }
+
     const filters = [{
       kinds: [KIND_LIVE_CHAT],
       '#a': [stream.address],
@@ -2078,6 +2284,12 @@
         if (seenIds.has(ev.id)) return;
         seenIds.add(ev.id);
         renderChatMessage(ev);
+        // Queue profile fetch for unknown sender
+        if (!state.profilesByPubkey.has(ev.pubkey)) unknownPubkeys.add(ev.pubkey);
+      },
+      eose: () => {
+        // Batch-fetch all profiles we saw during history replay
+        fetchMissingChatProfiles();
       }
     });
   }
@@ -2324,30 +2536,63 @@
     videos.slice(0, 2).forEach((m) => {
       const frame = document.createElement('div');
       frame.className = 'profile-feed-video';
-      if (/\.m3u8($|\?)/i.test(m.url)) {
-        const a = document.createElement('a');
-        a.href = m.url;
-        a.target = '_blank';
-        a.rel = 'noopener noreferrer';
-        a.textContent = '▶ Open HLS stream';
-        frame.appendChild(a);
-      } else {
-        // Build video with fallback link on error
+      const isHls = /\.m3u8($|\?)/i.test(m.url);
+
+      if (isHls) {
+        // HLS video: use HLS.js if needed, otherwise native
         const v = document.createElement('video');
         v.controls = true;
         v.playsInline = true;
-        v.muted = true;
-        v.autoplay = false;
         v.preload = 'metadata';
-        // Use <source> for better error handling
-        const src = document.createElement('source');
-        src.src = m.url;
-        // Guess MIME type
-        const ext = m.url.split('?')[0].toLowerCase().split('.').pop();
-        const mimes = { mp4: 'video/mp4', webm: 'video/webm', mov: 'video/mp4', m4v: 'video/mp4', mkv: 'video/x-matroska' };
-        if (mimes[ext]) src.type = mimes[ext];
-        v.appendChild(src);
-        // On error, swap to a clickable link fallback
+        v.style.cssText = 'width:100%;height:100%;max-height:320px;object-fit:contain;display:block;background:#000;';
+        frame.appendChild(v);
+
+        const tryHls = async () => {
+          if (v.canPlayType('application/vnd.apple.mpegurl')) {
+            v.src = m.url;
+          } else {
+            try {
+              const Hls = await ensureHlsJs();
+              if (Hls.isSupported()) {
+                const hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+                hls.loadSource(m.url);
+                hls.attachMedia(v);
+                hls.on(Hls.Events.ERROR, (_e, data) => {
+                  if (data && data.fatal) {
+                    hls.destroy();
+                    const a = document.createElement('a');
+                    a.href = m.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+                    a.style.cssText = 'display:flex;align-items:center;justify-content:center;width:100%;min-height:80px;color:var(--zap);font-size:.74rem;font-weight:600;text-decoration:none;padding:.75rem;';
+                    a.textContent = '▶ Open HLS stream';
+                    if (v.parentNode) v.parentNode.replaceChild(a, v);
+                  }
+                });
+              } else {
+                const a = document.createElement('a');
+                a.href = m.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+                a.textContent = '▶ Open HLS stream';
+                frame.innerHTML = '';
+                frame.appendChild(a);
+              }
+            } catch (_) {
+              const a = document.createElement('a');
+              a.href = m.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+              a.textContent = '▶ Open HLS stream';
+              frame.innerHTML = '';
+              frame.appendChild(a);
+            }
+          }
+        };
+        tryHls();
+      } else {
+        // Regular video (mp4, webm, etc.)
+        const v = document.createElement('video');
+        v.controls = true;
+        v.playsInline = true;
+        v.preload = 'metadata';
+        v.style.cssText = 'width:100%;height:100%;max-height:320px;object-fit:contain;display:block;background:#000;';
+        // Set src directly (more reliable than <source> elements for error handling)
+        v.src = m.url;
         v.addEventListener('error', () => {
           const fallback = document.createElement('a');
           fallback.href = m.url;
@@ -2355,7 +2600,7 @@
           fallback.rel = 'noopener noreferrer';
           fallback.style.cssText = 'display:flex;align-items:center;justify-content:center;width:100%;min-height:80px;color:var(--zap);font-size:.74rem;font-weight:600;text-decoration:none;padding:.75rem;';
           fallback.textContent = '▶ Open Video';
-          frame.replaceChild(fallback, v);
+          if (v.parentNode) v.parentNode.replaceChild(fallback, v);
         });
         frame.appendChild(v);
       }
@@ -2365,13 +2610,16 @@
   function renderProfileFeedInto(listEl, notes, profile, pubkey, aggregates) {
     if (!listEl) return;
 
+    // Infinite scroll: honour per-element limit stored in data attribute
+    const limit = parseInt(listEl.dataset.feedLimit || '15', 10);
+
     if (!notes.length) {
       listEl.innerHTML = '<div class="profile-feed-empty">No notes found yet for this profile.</div>';
       return;
     }
 
     listEl.innerHTML = '';
-    notes.slice(0, 50).forEach((note) => {
+    notes.slice(0, limit).forEach((note) => {
       const isRepost = note.kind === 6;
       const item = document.createElement('div');
       item.className = 'profile-feed-item';
@@ -2428,10 +2676,27 @@
       const avEl = qs('.profile-feed-av', item);
       setAvatarEl(avEl, displayProfile.picture || '', pickAvatar(displayPubkey));
       if (avEl && displayProfile.nip05) avEl.classList.add('nip05-square');
+      if (avEl) { avEl.style.cursor = 'pointer'; avEl.onclick = (e) => { e.stopPropagation(); showProfileByPubkey(displayPubkey); }; }
       const nameEl = qs('.profile-feed-name', item);
-      if (nameEl) nameEl.textContent = displayProfile.display_name || displayProfile.name || shortHex(displayPubkey);
+      if (nameEl) {
+        nameEl.textContent = displayProfile.name || shortHex(displayPubkey);
+        nameEl.style.cursor = 'pointer';
+        nameEl.onclick = (e) => { e.stopPropagation(); showProfileByPubkey(displayPubkey); };
+      }
       const timeEl = qs('.profile-feed-time', item);
       if (timeEl) timeEl.textContent = `${formatTimeAgo(note.created_at)} ago`;
+
+      // Fetch and display profile if not cached yet
+      if (!state.profilesByPubkey.has(displayPubkey)) {
+        fetchProfileIfNeeded(displayPubkey).then(() => {
+          const fresh = profileFor(displayPubkey);
+          if (nameEl) { nameEl.textContent = fresh.name || shortHex(displayPubkey); nameEl.style.cursor = 'pointer'; }
+          if (avEl) {
+            setAvatarEl(avEl, fresh.picture || '', pickAvatar(displayPubkey));
+            avEl.classList.toggle('nip05-square', !!fresh.nip05);
+          }
+        }).catch(() => {});
+      }
 
       const mediaUrls = extractMediaUrlsFromEvent(displayNote);
       const mediaItems = mediaUrls
@@ -2440,8 +2705,14 @@
       const text = stripMediaUrlsFromText(displayNote.content || '', mediaUrls);
       const textEl = qs('.profile-feed-text', item);
       if (textEl) {
-        textEl.textContent = text || (mediaItems.length ? '' : (isRepost ? '[Reposted content]' : '[empty note]'));
-        textEl.style.display = text || !mediaItems.length ? 'block' : 'none';
+        textEl.innerHTML = '';
+        if (text) {
+          textEl.appendChild(renderNostrContent(text));
+          textEl.style.display = 'block';
+        } else {
+          textEl.textContent = mediaItems.length ? '' : (isRepost ? '[Reposted content]' : '[empty note]');
+          textEl.style.display = !mediaItems.length ? 'block' : 'none';
+        }
       }
 
       const mediaWrap = qs('.profile-feed-media-wrap', item);
@@ -2485,15 +2756,25 @@
           const cAvEl = qs('.profile-comment-av', row);
           setAvatarEl(cAvEl, cp.picture || '', pickAvatar(comment.pubkey));
           if (cAvEl && cp.nip05) cAvEl.classList.add('nip05-square');
+          if (cAvEl) { cAvEl.style.cursor = 'pointer'; cAvEl.onclick = (e) => { e.stopPropagation(); showProfileByPubkey(comment.pubkey); }; }
           const n = qs('.profile-comment-meta .n', row);
-          if (n) n.textContent = cp.display_name || cp.name || shortHex(comment.pubkey);
+          if (n) {
+            n.textContent = cp.display_name || cp.name || shortHex(comment.pubkey);
+            n.style.cursor = 'pointer';
+            n.onclick = (e) => { e.stopPropagation(); showProfileByPubkey(comment.pubkey); };
+          }
           const t = qs('.profile-comment-meta .t', row);
           if (t) t.textContent = `${formatTimeAgo(comment.created_at)} ago`;
           const ct = qs('.profile-comment-text', row);
-          if (ct) ct.textContent = (comment.content || '').trim() || '[empty comment]';
+          if (ct) {
+            const commentText = (comment.content || '').trim();
+            ct.innerHTML = '';
+            if (commentText) { ct.appendChild(renderNostrContent(commentText)); }
+            else { ct.textContent = '[empty comment]'; }
+          }
 
           // If profile not cached yet, fetch and update row
-          if (!cp.name && !cp.display_name && !cp.picture) {
+          if (!state.profilesByPubkey.has(comment.pubkey)) {
             fetchProfileIfNeeded(comment.pubkey).then(() => {
               const fresh = profileFor(comment.pubkey);
               if (n) n.textContent = fresh.display_name || fresh.name || shortHex(comment.pubkey);
@@ -2551,6 +2832,33 @@
 
       listEl.appendChild(item);
     });
+
+    // Infinite scroll sentinel — appear if more posts exist beyond current limit
+    if (notes.length > limit) {
+      const sentinel = document.createElement('div');
+      sentinel.className = 'feed-sentinel';
+      sentinel.innerHTML = '<span class="feed-sentinel-label">Loading more posts…</span>';
+      listEl.appendChild(sentinel);
+
+      const obs = new IntersectionObserver((entries) => {
+        if (!entries[0].isIntersecting) return;
+        obs.disconnect();
+        const newLimit = limit + 15;
+        listEl.dataset.feedLimit = String(newLimit);
+        // Re-render with higher limit using current data
+        const map = state.profileNotesByPubkey.get(pubkey) || new Map();
+        const freshNotes = Array.from(map.values())
+          .filter((ev) => {
+            if (!ev || ev.pubkey !== pubkey) return false;
+            if (ev.kind === 6) return true;
+            return isTopLevelProfilePost(ev, pubkey);
+          })
+          .sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+        const freshAgg = buildProfilePostAggregates(pubkey, freshNotes);
+        renderProfileFeedInto(listEl, freshNotes, profileFor(pubkey), pubkey, freshAgg);
+      }, { rootMargin: '180px' });
+      obs.observe(sentinel);
+    }
   }
   function renderProfileFeed(pubkey) {
     const leftList = qs('#profileFeedList');
@@ -2617,11 +2925,11 @@
       const caption = (note.content || '').trim();
       urls.forEach((url) => {
         const kind = classifyMediaUrl(url);
-        if (kind === 'video' && !seenVideo.has(url) && videos.length < 36) {
+        if (kind === 'video' && !seenVideo.has(url) && videos.length < 200) {
           videos.push({ url, note, caption });
           seenVideo.add(url);
         }
-        if (kind === 'photo' && !seenPhoto.has(url) && photos.length < 72) {
+        if (kind === 'photo' && !seenPhoto.has(url) && photos.length < 500) {
           photos.push({ url, note, caption });
           seenPhoto.add(url);
         }
@@ -2685,8 +2993,10 @@
       return;
     }
 
+    const limit = parseInt(wrap.dataset.mediaLimit || '9', 10);
+
     wrap.innerHTML = '';
-    media.videos.slice(0, 18).forEach((item) => {
+    media.videos.slice(0, limit).forEach((item) => {
       const card = document.createElement('div');
       card.className = 'profile-video-card';
 
@@ -2744,6 +3054,23 @@
       card.appendChild(meta);
       wrap.appendChild(card);
     });
+
+    // Infinite scroll sentinel for videos
+    if (media.videos.length > limit) {
+      const sentinel = document.createElement('div');
+      sentinel.className = 'feed-sentinel media-sentinel';
+      sentinel.style.gridColumn = '1/-1';
+      sentinel.innerHTML = '<span class="feed-sentinel-label">Loading more videos…</span>';
+      wrap.appendChild(sentinel);
+
+      const obs = new IntersectionObserver((entries) => {
+        if (!entries[0].isIntersecting) return;
+        obs.disconnect();
+        wrap.dataset.mediaLimit = String(limit + 9);
+        renderProfileVideos(media);
+      }, { rootMargin: '180px' });
+      obs.observe(sentinel);
+    }
   }
 
   function renderProfilePhotos(media) {
@@ -2755,8 +3082,10 @@
       return;
     }
 
+    const limit = parseInt(wrap.dataset.mediaLimit || '18', 10);
+
     wrap.innerHTML = '';
-    media.photos.slice(0, 36).forEach((item) => {
+    media.photos.slice(0, limit).forEach((item) => {
       const card = document.createElement('a');
       card.className = 'profile-photo-card';
       card.href = item.url;
@@ -2776,6 +3105,23 @@
 
       wrap.appendChild(card);
     });
+
+    // Infinite scroll sentinel for photos
+    if (media.photos.length > limit) {
+      const sentinel = document.createElement('div');
+      sentinel.className = 'feed-sentinel media-sentinel';
+      sentinel.style.gridColumn = '1/-1';
+      sentinel.innerHTML = '<span class="feed-sentinel-label">Loading more photos…</span>';
+      wrap.appendChild(sentinel);
+
+      const obs = new IntersectionObserver((entries) => {
+        if (!entries[0].isIntersecting) return;
+        obs.disconnect();
+        wrap.dataset.mediaLimit = String(limit + 18);
+        renderProfilePhotos(media);
+      }, { rootMargin: '180px' });
+      obs.observe(sentinel);
+    }
   }
 
   function renderProfileCollections(pubkey) {
@@ -3020,8 +3366,14 @@
 
     const leftList = qs('#profileFeedList');
     const sideList = qs('#profileFeedListSide');
-    if (leftList) leftList.innerHTML = '<div class="profile-feed-empty">Loading notes from relays...</div>';
-    if (sideList) sideList.innerHTML = '<div class="profile-feed-empty">Loading notes from relays...</div>';
+    if (leftList) { leftList.innerHTML = '<div class="profile-feed-empty">Loading notes from relays...</div>'; leftList.dataset.feedLimit = '15'; }
+    if (sideList) { sideList.innerHTML = '<div class="profile-feed-empty">Loading notes from relays...</div>'; sideList.dataset.feedLimit = '15'; }
+
+    // Reset media limits
+    const videosEl = qs('#profileVideosList');
+    const photosEl = qs('#profilePhotosList');
+    if (videosEl) videosEl.dataset.mediaLimit = '9';
+    if (photosEl) photosEl.dataset.mediaLimit = '18';
 
     const existing = state.profileNotesByPubkey.get(pubkey);
     if (!existing) state.profileNotesByPubkey.set(pubkey, new Map());
@@ -3514,7 +3866,7 @@
       applySettings(nextSettings, { reconnect: false });
       closeOnboarding();
     } catch (err) {
-      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '✓ Save & Enter NostrFlux'; }
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '✓ Save & Enter Sifaka Live'; }
       alert(err.message || 'Failed to publish profile. Please try again.');
     }
   }
@@ -4028,20 +4380,36 @@
         const btn = document.createElement('button');
         btn.className = 'atl-item';
         const inList = pubkey && list.pubkeys.includes(pubkey);
-        btn.textContent = (inList ? '✓ ' : '') + (list.name || 'Unnamed List');
-        if (inList) btn.classList.add('atl-saved');
+        if (inList) {
+          btn.textContent = '✓ ' + (list.name || 'Unnamed List');
+          btn.classList.add('atl-saved');
+          btn.title = 'Click to remove from this list';
+        } else {
+          btn.textContent = (list.name || 'Unnamed List');
+          btn.title = 'Click to add to this list';
+        }
         btn.addEventListener('click', async () => {
           if (!pubkey) return;
           if (!state.user) { window.openLogin(); return; }
           try {
             const tags = [];
-            list.pubkeys.forEach((pk) => tags.push(['p', pk]));
-            if (!inList) tags.push(['p', pubkey]);
+            if (!inList) {
+              // Adding: include all existing pubkeys + the new one
+              list.pubkeys.forEach((pk) => tags.push(['p', pk]));
+              tags.push(['p', pubkey]);
+            } else {
+              // Removing: include all pubkeys except this one
+              list.pubkeys.filter((pk) => pk !== pubkey).forEach((pk) => tags.push(['p', pk]));
+            }
             tags.push(['d', list.d]);
             if (list.name) tags.push(['name', list.name]);
             await signAndPublish(30000, '', tags);
-            // Optimistically update local
-            if (!inList) list.pubkeys.push(pubkey);
+            // Optimistically update local state
+            if (!inList) {
+              list.pubkeys.push(pubkey);
+            } else {
+              list.pubkeys = list.pubkeys.filter((pk) => pk !== pubkey);
+            }
             renderAtlDropdown();
             renderListFilterDD();
           } catch (err) {
@@ -4465,7 +4833,7 @@
           await window.webln.enable();
           const zapAmountMsats = 21000;
           const zapTags = [['relays', ...state.relays], ['amount', String(zapAmountMsats)], ['p', stream.pubkey], ['e', stream.id]];
-          const zapRequest = await signAndPublish(9734, '⚡ zapping from NostrFlux', zapTags);
+          const zapRequest = await signAndPublish(9734, '⚡ zapping from Sifaka Live', zapTags);
           const [user, domain] = lud16.split('@');
           const meta = await fetch(`https://${domain}/.well-known/lnurlp/${user}`).then((r) => r.json());
           if (!meta.callback) throw new Error('Invalid LNURL response.');
