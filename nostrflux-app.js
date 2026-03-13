@@ -679,6 +679,7 @@
     const tagMap = parseTags(ev.tags || []);
     const d = firstTag(tagMap, 'd') || ev.id.slice(0, 12);
     const status = (firstTag(tagMap, 'status') || 'live').toLowerCase();
+    // NIP-53 address always uses the event publisher's pubkey
     const address = `${KIND_LIVE_EVENT}:${ev.pubkey}:${d}`;
     const starts = Number(firstTag(tagMap, 'starts') || 0) || null;
     const title = firstTag(tagMap, 'title') || (ev.content || '').slice(0, 90) || 'Untitled stream';
@@ -686,9 +687,28 @@
     const image = firstTag(tagMap, 'image') || firstTag(tagMap, 'thumb') || '';
     const streaming = firstTag(tagMap, 'streaming') || firstTag(tagMap, 'url') || '';
     const participants = Number(firstTag(tagMap, 'current_participants') || 0) || 0;
+
+    // NIP-53: platforms (zap.stream, shosho, etc.) publish under their own key
+    // but embed the real streamer as ["p", "<pubkey>", "<relay>", "host"].
+    let hostPubkey = ev.pubkey;
+    const platformPubkey_ref = { val: null };
+    for (const t of (ev.tags || [])) {
+      if (t[0] === 'p' && t[1] && /^[0-9a-f]{64}$/i.test(t[1])) {
+        const role = (t[3] || t[2] || '').toLowerCase().trim();
+        if (role === 'host' || role === 'streamer') {
+          hostPubkey = t[1];
+          platformPubkey_ref.val = ev.pubkey;
+          break;
+        }
+      }
+    }
+    const platformPubkey = platformPubkey_ref.val;
+
     return {
       id: ev.id,
-      pubkey: ev.pubkey,
+      pubkey: ev.pubkey,     // event publisher (used for NIP-53 address & ownership)
+      hostPubkey,            // actual streamer for display (equals pubkey when self-published)
+      platformPubkey,        // non-null when a platform published on behalf of the streamer
       created_at: ev.created_at,
       kind: ev.kind,
       d,
@@ -1125,7 +1145,8 @@
   }
 
   function buildStreamCard(stream, idx) {
-    const p = profileFor(stream.pubkey);
+    // NIP-53: show actual streamer (hostPubkey), not the platform publisher
+    const p = profileFor(stream.hostPubkey);
     const card = document.createElement('div');
     const hasViewers = (stream.participants || 0) > 0;
     const hasVideo = !!stream.streaming;
@@ -1156,18 +1177,24 @@
           <div>
             <div class="ci-title"></div>
             <div class="ci-host"></div>
-            <div class="ci-tags"><span class="tag">NIP-53</span></div>
+            <div class="ci-tags"><span class="tag">NIP-53</span><span class="ci-hosted-badge"></span></div>
           </div>
         </div>
       </div>`;
 
     const avEl = qs('.ci-av', card);
     if (avEl) {
-      setAvatarEl(avEl, p.picture || '', pickAvatar(stream.pubkey));
+      setAvatarEl(avEl, p.picture || '', pickAvatar(stream.hostPubkey));
       if (p.nip05) avEl.classList.add('nip05-square');
     }
     qs('.ci-title', card).textContent = stream.title;
-    qs('.ci-host', card).textContent = p.nip05 || p.name;
+    qs('.ci-host', card).textContent = p.nip05 || p.name || shortHex(stream.hostPubkey);
+    const hostedBadge = qs('.ci-hosted-badge', card);
+    if (hostedBadge && stream.platformPubkey) {
+      const plat = profileFor(stream.platformPubkey);
+      const platName = plat.nip05 ? plat.nip05.replace(/^.*@/, '') : (plat.name || '');
+      if (platName) hostedBadge.textContent = 'via ' + platName;
+    }
     card.addEventListener('click', () => openStream(stream.address));
     return card;
   }
@@ -1176,7 +1203,7 @@
     const allStreams = sortedLiveStreams();
     const filterPubkeys = getPubkeysForFilter();
     return filterPubkeys
-      ? allStreams.filter((s) => filterPubkeys.has(s.pubkey))
+      ? allStreams.filter((s) => filterPubkeys.has(s.pubkey) || filterPubkeys.has(s.hostPubkey))
       : allStreams;
   }
 
@@ -1451,7 +1478,7 @@
   /* ---- Render hero info panel ---- */
   function renderHero(stream, idx, total) {
     if (!stream) return;
-    const p = profileFor(stream.pubkey);
+    const p = profileFor(stream.hostPubkey);
 
     const set = (id, v) => { const el = qs('#' + id); if (el) el.textContent = v; };
     set('heroTitle', stream.title);
@@ -1463,7 +1490,7 @@
     set('heroTime', stream.starts ? new Date(stream.starts * 1000).toUTCString().slice(17, 22) + ' UTC' : 'live');
 
     const avEl = qs('#heroAv');
-    if (avEl) setAvatarEl(avEl, p.picture || '', pickAvatar(stream.pubkey));
+    if (avEl) setAvatarEl(avEl, p.picture || '', pickAvatar(stream.hostPubkey));
     const nip05El = qs('#heroNip05');
     if (nip05El) { nip05El.style.display = p.nip05 ? 'inline' : 'none'; if (p.nip05) nip05El.title = p.nip05; }
 
@@ -1657,7 +1684,7 @@
   }
 
   function renderVideo(stream) {
-    const p = profileFor(stream.pubkey);
+    const p = profileFor(stream.hostPubkey);
 
     // Title & summary
     const title = qs('.sib-title');
@@ -1668,15 +1695,15 @@
     // Host avatar
     const av = qs('.sib-av');
     if (av) {
-      setAvatarEl(av, p.picture || '', pickAvatar(stream.pubkey));
-      av.onclick = () => showProfileByPubkey(stream.pubkey);
+      setAvatarEl(av, p.picture || '', pickAvatar(stream.hostPubkey));
+      av.onclick = () => showProfileByPubkey(stream.hostPubkey);
     }
 
     // Host name + nip05
     const name = qs('.sib-name');
     if (name) {
       name.innerHTML = '';
-      name.textContent = p.name || shortHex(stream.pubkey);
+      name.textContent = p.name || shortHex(stream.hostPubkey);
       if (p.nip05) {
         const badge = document.createElement('span');
         badge.className = 'nip05-badge';
@@ -1687,7 +1714,26 @@
       }
     }
     const ident = qs('.sib-identity');
-    if (ident) ident.textContent = p.nip05 || shortHex(stream.pubkey);
+    if (ident) ident.textContent = p.nip05 || shortHex(stream.hostPubkey);
+
+    // "Hosted by" flashy box — only shown for platform-proxied streams
+    const sibHostedBy = qs('.sib-hosted-by') || (() => {
+      const el = document.createElement('div');
+      el.className = 'sib-hosted-by';
+      if (ident && ident.parentNode) ident.parentNode.appendChild(el);
+      return el;
+    })();
+    if (sibHostedBy) {
+      if (stream.platformPubkey) {
+        const plat = profileFor(stream.platformPubkey);
+        const platName = plat.nip05
+          ? plat.nip05.replace(/^.*@/, '')
+          : (plat.name || shortHex(stream.platformPubkey));
+        sibHostedBy.innerHTML = `<div class="hosted-by-box"><span class="hosted-by-icon">🎙️</span><span class="hosted-by-text"><span class="hosted-by-label">Hosted via</span><span class="hosted-by-name">${platName}</span></span></div>`;
+      } else {
+        sibHostedBy.innerHTML = '';
+      }
+    }
 
     // Stats — viewers & relays
     const viewers = qs('#theaterViewers');
@@ -1736,11 +1782,12 @@
     if (likeCount) likeCount.textContent = '0';
 
     // Follow button — reflect current follow state
-    updateTheaterFollowBtn(stream.pubkey);
+    updateTheaterFollowBtn(stream.hostPubkey);
 
     renderVideoPlayback(stream);
 
     // Owner-only controls
+    // Ownership: the person who published the NIP-53 event (stream.pubkey), not the host
     const owner = state.user && state.user.pubkey === stream.pubkey;
     const endBtn = qs('#endStreamBtn');
     if (endBtn) endBtn.classList.toggle('visible', !!owner);
@@ -1791,7 +1838,7 @@
       return;
     }
 
-    const streams = sortedLiveStreams().filter((s) => s.title.toLowerCase().includes(term) || profileFor(s.pubkey).name.toLowerCase().includes(term)).slice(0, 5);
+    const streams = sortedLiveStreams().filter((s) => s.title.toLowerCase().includes(term) || profileFor(s.hostPubkey).name.toLowerCase().includes(term)).slice(0, 5);
 
     // Local cache match — all cached profiles, not just streamers
     const localProfiles = Array.from(state.profilesByPubkey.values()).filter((p) => {
@@ -2156,7 +2203,7 @@
   }
 
   function subscribeProfiles(pubkeys) {
-    // Always ensure the logged-in user's profile is included in every fetch
+    // Always include the logged-in user so their profile isn't lost when other fetches fire
     const allKeys = [...pubkeys];
     if (state.user && state.user.pubkey && !allKeys.includes(state.user.pubkey)) {
       allKeys.unshift(state.user.pubkey);
@@ -2223,8 +2270,10 @@
           renderLiveGrid();
           if (!state.featuredCycleTimer) startHeroCycle();
           const streams = sortedLiveStreams();
-          const pubs = streams.map((s) => s.pubkey);
-          subscribeProfiles(pubs);
+          // Fetch profiles for both the event publisher AND actual streamer
+          const pubSet = new Set();
+          streams.forEach((s) => { pubSet.add(s.pubkey); if (s.hostPubkey) pubSet.add(s.hostPubkey); });
+          subscribeProfiles(Array.from(pubSet));
           if (state.selectedProfilePubkey) renderProfilePage(state.selectedProfilePubkey);
         }
       }
@@ -2414,7 +2463,7 @@
 
   function getLatestLiveByPubkey(pubkey) {
     return Array.from(state.streamsByAddress.values())
-      .filter((s) => s.pubkey === pubkey && s.status === 'live')
+      .filter((s) => (s.pubkey === pubkey || s.hostPubkey === pubkey) && s.status === 'live')
       .sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0] || null;
   }
 
@@ -2537,26 +2586,20 @@
       const frame = document.createElement('div');
       frame.className = 'profile-feed-video';
       const isHls = /\.m3u8($|\?)/i.test(m.url);
-
       if (isHls) {
-        // HLS video: use HLS.js if needed, otherwise native
         const v = document.createElement('video');
-        v.controls = true;
-        v.playsInline = true;
-        v.preload = 'metadata';
+        v.controls = true; v.playsInline = true; v.preload = 'metadata';
         v.style.cssText = 'width:100%;height:100%;max-height:320px;object-fit:contain;display:block;background:#000;';
         frame.appendChild(v);
-
-        const tryHls = async () => {
+        (async () => {
           if (v.canPlayType('application/vnd.apple.mpegurl')) {
             v.src = m.url;
           } else {
             try {
               const Hls = await ensureHlsJs();
               if (Hls.isSupported()) {
-                const hls = new Hls({ enableWorker: true, lowLatencyMode: false });
-                hls.loadSource(m.url);
-                hls.attachMedia(v);
+                const hls = new Hls({ enableWorker: true });
+                hls.loadSource(m.url); hls.attachMedia(v);
                 hls.on(Hls.Events.ERROR, (_e, data) => {
                   if (data && data.fatal) {
                     hls.destroy();
@@ -2567,37 +2610,18 @@
                     if (v.parentNode) v.parentNode.replaceChild(a, v);
                   }
                 });
-              } else {
-                const a = document.createElement('a');
-                a.href = m.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
-                a.textContent = '▶ Open HLS stream';
-                frame.innerHTML = '';
-                frame.appendChild(a);
               }
-            } catch (_) {
-              const a = document.createElement('a');
-              a.href = m.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
-              a.textContent = '▶ Open HLS stream';
-              frame.innerHTML = '';
-              frame.appendChild(a);
-            }
+            } catch (_) {}
           }
-        };
-        tryHls();
+        })();
       } else {
-        // Regular video (mp4, webm, etc.)
         const v = document.createElement('video');
-        v.controls = true;
-        v.playsInline = true;
-        v.preload = 'metadata';
+        v.controls = true; v.playsInline = true; v.preload = 'metadata';
         v.style.cssText = 'width:100%;height:100%;max-height:320px;object-fit:contain;display:block;background:#000;';
-        // Set src directly (more reliable than <source> elements for error handling)
         v.src = m.url;
         v.addEventListener('error', () => {
           const fallback = document.createElement('a');
-          fallback.href = m.url;
-          fallback.target = '_blank';
-          fallback.rel = 'noopener noreferrer';
+          fallback.href = m.url; fallback.target = '_blank'; fallback.rel = 'noopener noreferrer';
           fallback.style.cssText = 'display:flex;align-items:center;justify-content:center;width:100%;min-height:80px;color:var(--zap);font-size:.74rem;font-weight:600;text-decoration:none;padding:.75rem;';
           fallback.textContent = '▶ Open Video';
           if (v.parentNode) v.parentNode.replaceChild(fallback, v);
@@ -2944,7 +2968,7 @@
     if (!list) return;
 
     const items = Array.from(state.streamsByAddress.values())
-      .filter((stream) => stream.pubkey === pubkey && stream.status !== 'live')
+      .filter((stream) => (stream.pubkey === pubkey || stream.hostPubkey === pubkey) && stream.status !== 'live')
       .sort((a, b) => (b.created_at || 0) - (a.created_at || 0))
       .slice(0, 24);
 
@@ -3504,7 +3528,7 @@
       bannerImg.style.display = 'none';
     }
 
-    const userStreams = Array.from(state.streamsByAddress.values()).filter((s) => s.pubkey === pubkey);
+    const userStreams = Array.from(state.streamsByAddress.values()).filter((s) => s.pubkey === pubkey || s.hostPubkey === pubkey);
     const sinceEl = qs('#profNostrSince');
     const firstSeenTs = estimateProfileFirstSeen(pubkey, p);
     if (sinceEl) sinceEl.textContent = ''; // hidden via CSS; kept for Time on Nostr stat tile
@@ -4379,7 +4403,7 @@
       lists.forEach((list) => {
         const btn = document.createElement('button');
         btn.className = 'atl-item';
-        const inList = pubkey && list.pubkeys.includes(pubkey);
+        const inList = !!(pubkey && list.pubkeys.includes(pubkey));
         if (inList) {
           btn.textContent = '✓ ' + (list.name || 'Unnamed List');
           btn.classList.add('atl-saved');
@@ -4393,22 +4417,22 @@
           if (!state.user) { window.openLogin(); return; }
           try {
             const tags = [];
-            if (!inList) {
-              // Adding: include all existing pubkeys + the new one
+            if (inList) {
+              // Remove: republish list without this pubkey
+              list.pubkeys.filter((pk) => pk !== pubkey).forEach((pk) => tags.push(['p', pk]));
+            } else {
+              // Add: republish list with this pubkey appended
               list.pubkeys.forEach((pk) => tags.push(['p', pk]));
               tags.push(['p', pubkey]);
-            } else {
-              // Removing: include all pubkeys except this one
-              list.pubkeys.filter((pk) => pk !== pubkey).forEach((pk) => tags.push(['p', pk]));
             }
             tags.push(['d', list.d]);
             if (list.name) tags.push(['name', list.name]);
             await signAndPublish(30000, '', tags);
             // Optimistically update local state
-            if (!inList) {
-              list.pubkeys.push(pubkey);
-            } else {
+            if (inList) {
               list.pubkeys = list.pubkeys.filter((pk) => pk !== pubkey);
+            } else {
+              list.pubkeys.push(pubkey);
             }
             renderAtlDropdown();
             renderListFilterDD();
@@ -4749,9 +4773,9 @@
       const stream = state.streamsByAddress.get(state.selectedStreamAddress);
       if (!stream) return;
       if (!state.user) { window.openLogin(); return; }
-      state.selectedProfilePubkey = stream.pubkey;
+      state.selectedProfilePubkey = stream.hostPubkey;
       toggleFollowSelectedProfile();
-      updateTheaterFollowBtn(stream.pubkey);
+      updateTheaterFollowBtn(stream.hostPubkey);
     };
 
     // ---- "Also Live Now" reco panel ----
@@ -4769,14 +4793,14 @@
         return;
       }
       others.forEach((s, i) => {
-        const p = profileFor(s.pubkey);
+        const p = profileFor(s.hostPubkey);
         const item = document.createElement('div');
         item.className = 'reco-item';
         item.innerHTML = `
           <div class="reco-thumb"><div class="tc ${thumbClasses[i % thumbClasses.length]}" style="height:100%;display:flex;align-items:center;justify-content:center;font-size:1.2rem;"></div></div>
           <div class="reco-text"><div class="rt"></div><div class="rs"></div></div>`;
         qs('.rt', item).textContent = s.title || 'Untitled stream';
-        qs('.rs', item).innerHTML = `${p.name || shortHex(s.pubkey)} — <span style="color:var(--live)">${s.participants ? s.participants.toLocaleString() + ' live' : 'live'}</span>`;
+        qs('.rs', item).innerHTML = `${p.name || shortHex(s.hostPubkey)} — <span style="color:var(--live)">${s.participants ? s.participants.toLocaleString() + ' live' : 'live'}</span>`;
         if (s.image) {
           const thumb = qs('.reco-thumb', item);
           thumb.innerHTML = `<img src="${s.image}" style="width:100%;height:100%;object-fit:cover;" loading="lazy">`;
@@ -4825,7 +4849,7 @@
       const stream = state.streamsByAddress.get(state.selectedStreamAddress);
       if (!stream) return;
       if (!state.user) { window.openLogin(); return; }
-      const p = profileFor(stream.pubkey);
+      const p = profileFor(stream.hostPubkey);
       const lud16 = (p.lud16 || '').trim();
       if (!lud16) { alert('This streamer has no Lightning address (lud16) set on their Nostr profile.'); return; }
       if (window.webln) {
