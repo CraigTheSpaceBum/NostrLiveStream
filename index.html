@@ -242,8 +242,8 @@ nav {
 .nav-logo-img{width:26px;height:26px;object-fit:contain;border-radius:4px;flex-shrink:0;margin-right:.1rem;}
 .lm-logo-img{width:38px;height:38px;object-fit:contain;border-radius:6px;}
 .footer-logo-img{width:20px;height:20px;object-fit:contain;border-radius:3px;vertical-align:middle;}
-/* Hosted-by compact pill */
-.sib-hosted-by{margin-top:.42rem;}
+/* Hosted-by compact pill — inline in .sib-host-row, right of streamer info */
+.sib-hosted-by{margin-left:.55rem;display:flex;align-items:center;}
 .hosted-by-box{
   display:inline-flex;align-items:center;gap:.46rem;
   padding:.34rem .58rem .34rem .36rem;
@@ -317,7 +317,9 @@ nav {
 .nip05-text{color:var(--nip05);}
 
 /* Action buttons row (Zap, Follow, Share, Like, Report) */
-.sib-actions-row{display:flex;align-items:center;gap:.45rem;flex-wrap:wrap;margin-left:auto;}
+.sib-actions-row{display:flex;align-items:center;gap:.45rem;flex-wrap:wrap;}
+/* Under-title variant: rendered just below the stream title */
+.sib-actions-under-title{margin-bottom:.6rem;}
 .action-btn{background:var(--surface2);border:1px solid var(--border);border-radius:7px;padding:.33rem .7rem;cursor:pointer;font-size:.77rem;color:var(--text2);font-family:'DM Sans',sans-serif;display:flex;align-items:center;gap:.27rem;transition:all .15s;font-weight:500;}
 .action-btn:hover{border-color:var(--border2);color:var(--text);}
 .action-btn.like-btn:hover,.action-btn.liked{border-color:var(--live);color:var(--live);background:rgba(255,59,92,.08);}
@@ -1849,7 +1851,16 @@ footer p{font-size:.72rem;color:var(--muted);}
           <button class="edit-pencil owner-only visible" title="Edit title"></button>
         </div>
 
-        <!-- Host row -->
+        <!-- Action buttons: directly under title, aligned left -->
+        <div class="sib-actions-row sib-actions-under-title">
+          <button class="btn btn-zap" id="theaterZapBtn" style="padding:.36rem .8rem;font-size:.79rem;" onclick="theaterZap()">⚡ Zap</button>
+          <button class="btn btn-follow" id="theaterFollowBtn" style="padding:.36rem .8rem;font-size:.79rem;" onclick="toggleTheaterFollow()">+ Follow</button>
+          <button class="action-btn share-btn" onclick="shareStream()">Share</button>
+          <button class="action-btn like-btn" id="likeBtn" onclick="toggleLike()">❤ <span id="likeCount">0</span></button>
+          <button class="action-btn report-btn" title="Report stream">⚑</button>
+        </div>
+
+        <!-- Host row (avatar + name + hosted-via pill) -->
         <div class="sib-host-row">
           <div class="sib-av" onclick="showProfile('wavesound','','npub1abc...xyz','wave@bitcoin-cats.ca')"></div>
           <div class="sib-host-info">
@@ -1859,14 +1870,7 @@ footer p{font-size:.72rem;color:var(--muted);}
             <!-- NIP-05 shown; npub hidden because they have NIP-05 -->
             <div class="sib-identity nip05-text">wave@bitcoin-cats.ca</div>
           </div>
-          <!-- Actions: Zap, Follow, Share, Like, Report -->
-          <div class="sib-actions-row">
-            <button class="btn btn-zap" id="theaterZapBtn" style="padding:.36rem .8rem;font-size:.79rem;" onclick="theaterZap()">⚡ Zap</button>
-            <button class="btn btn-follow" id="theaterFollowBtn" style="padding:.36rem .8rem;font-size:.79rem;" onclick="toggleTheaterFollow()">+ Follow</button>
-            <button class="action-btn share-btn" onclick="shareStream()">Share</button>
-            <button class="action-btn like-btn" id="likeBtn" onclick="toggleLike()">❤ <span id="likeCount">0</span></button>
-            <button class="action-btn report-btn" title="Report stream">⚑</button>
-          </div>
+          <!-- Hosted-via pill sits here, to the right of streamer info -->
         </div>
 
         <!-- Stats row -->
