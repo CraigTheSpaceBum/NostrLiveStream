@@ -1982,8 +1982,9 @@ footer p{font-size:.72rem;color:var(--muted);}
         <div class="profile-action-box">
           <div class="profile-actions-row">
             <button class="btn btn-ghost" id="profileMessageBtn" onclick="openProfileMessage()">Message</button>
-            <button class="btn btn-zap">Zap</button>
+            <button class="btn btn-zap" id="profileZapBtn">Zap</button>
             <button class="btn btn-follow" id="profileFollowBtn" onclick="toggleFollowProfile()">+ Follow</button>
+            <button class="btn btn-primary" id="profileEditBtn" onclick="openProfileEditSettings()" style="display:none;">Edit Profile</button>
             <div class="atl-wrap" id="atlWrap">
               <button class="btn btn-ghost" id="profileAddToListBtn" onclick="toggleAtlDropdown(event)">Add to List ▾</button>
               <div class="atl-dropdown" id="atlDropdown">
@@ -2112,7 +2113,6 @@ footer p{font-size:.72rem;color:var(--muted);}
 <script src="./nostrflux-app.js"></script>
 </body>
 </html>
-
 
 
 

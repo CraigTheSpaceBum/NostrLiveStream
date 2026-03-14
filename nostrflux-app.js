@@ -89,7 +89,10 @@
     scriptPromises: {},
     streamZapTotals: new Map(),
     _theaterRuntimeInterval: null,
-    likedStreamAddresses: new Set()   // tracks which streams the user has liked
+    likedStreamAddresses: new Set(),  // tracks which streams the user has liked
+    activeViewerAddress: '',
+    pendingRouteAddress: '',
+    pendingRouteNaddr: ''
   };
 
   class RelayPool {
@@ -724,6 +727,270 @@
     };
   }
 
+  function isHomePath(pathname) {
+    const raw = (pathname || '/').trim();
+    const normalized = raw === '' ? '/' : (raw.replace(/\/+$/, '') || '/');
+    return normalized === '/' || normalized.toLowerCase() === '/index.html';
+  }
+
+  function decodePathPart(part) {
+    try {
+      return decodeURIComponent(part || '');
+    } catch (_) {
+      return part || '';
+    }
+  }
+
+  function pathParts(pathname) {
+    return (pathname || '').split('/').filter(Boolean).map((p) => decodePathPart(p).trim());
+  }
+
+  function extractNaddrFromPath(pathname) {
+    const parts = pathParts(pathname);
+    if (!parts.length) return '';
+    const candidate = parts[0].toLowerCase() === 'a' && parts[1] ? parts[1] : parts[0];
+    const naddr = (candidate || '').trim().toLowerCase();
+    return /^naddr1[023456789acdefghjklmnpqrstuvwxyz]+$/.test(naddr) ? naddr : '';
+  }
+
+  function normalizeNip05Value(value) {
+    const raw = (value || '').trim().toLowerCase();
+    if (!raw || raw.includes('/')) return '';
+    const parts = raw.split('@');
+    if (parts.length !== 2) return '';
+    const localPart = (parts[0] || '').trim();
+    const domain = (parts[1] || '').trim();
+    if (!localPart || !domain || !domain.includes('.')) return '';
+    if (!/^[a-z0-9._-]+$/i.test(localPart)) return '';
+    if (!/^[a-z0-9.-]+$/i.test(domain)) return '';
+    return `${localPart}@${domain}`;
+  }
+
+  function extractProfileTokenFromPath(pathname) {
+    const parts = pathParts(pathname);
+    if (!parts.length) return '';
+    if (parts[0].toLowerCase() === 'a') return '';
+    const token = parts[0];
+    const lower = token.toLowerCase();
+    if (/^npub1[023456789acdefghjklmnpqrstuvwxyz]+$/.test(lower)) return lower;
+    const nip05 = normalizeNip05Value(token);
+    if (nip05) return nip05;
+    return '';
+  }
+
+  function encodeStreamNaddr(stream) {
+    if (!stream || !window.NostrTools || !window.NostrTools.nip19 || typeof window.NostrTools.nip19.naddrEncode !== 'function') {
+      return '';
+    }
+    try {
+      return window.NostrTools.nip19.naddrEncode({
+        kind: Number(stream.kind || KIND_LIVE_EVENT),
+        pubkey: stream.pubkey,
+        identifier: stream.d,
+        relays: state.relays.slice(0, 3)
+      });
+    } catch (_) {
+      return '';
+    }
+  }
+
+  async function decodeNaddrToAddress(naddr) {
+    const value = (naddr || '').trim().toLowerCase();
+    if (!value) return '';
+    try {
+      const tools = await ensureNostrTools();
+      if (!tools || !tools.nip19 || typeof tools.nip19.decode !== 'function') return '';
+      const decoded = tools.nip19.decode(value);
+      if (!decoded || decoded.type !== 'naddr' || !decoded.data) return '';
+      const kind = Number(decoded.data.kind || KIND_LIVE_EVENT);
+      const pubkey = (decoded.data.pubkey || '').toLowerCase();
+      const identifier = (decoded.data.identifier || '').trim();
+      if (!pubkey || !identifier) return '';
+      return `${kind}:${pubkey}:${identifier}`;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  async function decodeNpubToPubkey(npub) {
+    const value = (npub || '').trim().toLowerCase();
+    if (!/^npub1[023456789acdefghjklmnpqrstuvwxyz]+$/.test(value)) return '';
+    try {
+      const tools = await ensureNostrTools();
+      if (!tools || !tools.nip19 || typeof tools.nip19.decode !== 'function') return '';
+      const decoded = tools.nip19.decode(value);
+      if (!decoded || decoded.type !== 'npub') return '';
+      return /^[0-9a-f]{64}$/i.test(decoded.data || '') ? decoded.data.toLowerCase() : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  async function resolveNip05ToPubkey(nip05) {
+    const normalized = normalizeNip05Value(nip05);
+    if (!normalized) return '';
+
+    const cached = Array.from(state.profilesByPubkey.values()).find(
+      (p) => normalizeNip05Value(p.nip05) === normalized
+    );
+    if (cached && cached.pubkey) return cached.pubkey.toLowerCase();
+
+    const [localPart, domain] = normalized.split('@');
+    try {
+      const resp = await fetch(`https://${domain}/.well-known/nostr.json?name=${encodeURIComponent(localPart)}`);
+      if (!resp.ok) return '';
+      const data = await resp.json();
+      const names = data && data.names ? data.names : {};
+      const candidate = names[localPart] || names[localPart.toLowerCase()];
+      return /^[0-9a-f]{64}$/i.test(candidate || '') ? candidate.toLowerCase() : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  async function resolveProfileTokenToPubkey(token) {
+    const value = (token || '').trim();
+    if (!value) return '';
+    const lower = value.toLowerCase();
+    if (/^npub1[023456789acdefghjklmnpqrstuvwxyz]+$/.test(lower)) {
+      return decodeNpubToPubkey(lower);
+    }
+    const nip05 = normalizeNip05Value(value);
+    if (nip05) return resolveNip05ToPubkey(nip05);
+    return '';
+  }
+
+  function syncHomeRoute(mode = 'push') {
+    if (!window.history || !window.history.pushState) return;
+    if (isHomePath(window.location.pathname)) return;
+    const method = mode === 'replace' ? 'replaceState' : 'pushState';
+    try {
+      window.history[method]({ view: 'home' }, '', '/');
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  function syncTheaterRoute(stream, mode = 'push') {
+    if (!stream || !window.history || !window.history.pushState) return;
+
+    const applyRoute = (naddr) => {
+      const val = (naddr || '').trim().toLowerCase();
+      if (!val) return false;
+      const targetPath = `/${val}`;
+      if (window.location.pathname === targetPath) return true;
+      const method = mode === 'replace' ? 'replaceState' : 'pushState';
+      try {
+        window.history[method]({ view: 'theater', address: stream.address, naddr: val }, '', targetPath);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    };
+
+    if (applyRoute(encodeStreamNaddr(stream))) return;
+    ensureNostrTools().then(() => {
+      applyRoute(encodeStreamNaddr(stream));
+    }).catch(() => {});
+  }
+
+  function syncProfileRoute(pubkey, mode = 'push') {
+    if (!pubkey || !window.history || !window.history.pushState) return;
+
+    const applyRoute = (path) => {
+      const targetPath = (path || '').trim();
+      if (!targetPath) return false;
+      if (window.location.pathname === targetPath) return true;
+      const method = mode === 'replace' ? 'replaceState' : 'pushState';
+      try {
+        window.history[method]({ view: 'profile', pubkey }, '', targetPath);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    };
+
+    const profile = profileFor(pubkey);
+    const nip05 = normalizeNip05Value(profile.nip05 || '');
+    if (nip05 && applyRoute(`/${nip05}`)) return;
+
+    const applyNpub = () => {
+      if (!window.NostrTools || !window.NostrTools.nip19 || typeof window.NostrTools.nip19.npubEncode !== 'function') {
+        return false;
+      }
+      try {
+        const npub = window.NostrTools.nip19.npubEncode(pubkey);
+        return applyRoute(`/${(npub || '').toLowerCase()}`);
+      } catch (_) {
+        return false;
+      }
+    };
+
+    if (applyNpub()) return;
+    ensureNostrTools().then(() => {
+      const latest = profileFor(pubkey);
+      const latestNip05 = normalizeNip05Value(latest.nip05 || '');
+      if (latestNip05) {
+        applyRoute(`/${latestNip05}`);
+        return;
+      }
+      applyNpub();
+    }).catch(() => {});
+  }
+
+  function tryOpenPendingRouteStream() {
+    if (!state.pendingRouteAddress) return false;
+    const stream = state.streamsByAddress.get(state.pendingRouteAddress);
+    if (!stream) return false;
+    const address = state.pendingRouteAddress;
+    state.pendingRouteAddress = '';
+    state.pendingRouteNaddr = '';
+    openStream(address, { routeMode: 'skip' });
+    return true;
+  }
+
+  function showHomeFromRoute() {
+    if (window.showPage) window.showPage('home', { routeMode: 'skip' });
+  }
+
+  async function syncViewFromLocation(opts = {}) {
+    const fallbackMode = opts.fallbackMode || 'replace';
+    const naddr = extractNaddrFromPath(window.location.pathname);
+    if (naddr) {
+      state.pendingRouteNaddr = naddr;
+      if (window.showVideoPage) window.showVideoPage({ routeMode: 'skip' });
+      const address = await decodeNaddrToAddress(naddr);
+      if (!address) {
+        state.pendingRouteAddress = '';
+        state.pendingRouteNaddr = '';
+        if (fallbackMode !== 'skip' && !isHomePath(window.location.pathname)) syncHomeRoute(fallbackMode);
+        showHomeFromRoute();
+        return;
+      }
+      state.pendingRouteAddress = address;
+      tryOpenPendingRouteStream();
+      return;
+    }
+
+    state.pendingRouteAddress = '';
+    state.pendingRouteNaddr = '';
+
+    const profileToken = extractProfileTokenFromPath(window.location.pathname);
+    if (profileToken) {
+      const pubkey = await resolveProfileTokenToPubkey(profileToken);
+      if (!pubkey) {
+        if (fallbackMode !== 'skip' && !isHomePath(window.location.pathname)) syncHomeRoute(fallbackMode);
+        showHomeFromRoute();
+        return;
+      }
+      showProfileByPubkey(pubkey, { routeMode: 'skip' });
+      return;
+    }
+
+    if (!isHomePath(window.location.pathname) && fallbackMode !== 'skip') syncHomeRoute(fallbackMode);
+    showHomeFromRoute();
+  }
+
   function parseProfile(ev) {
     let obj = {};
     try {
@@ -812,16 +1079,45 @@
     }
   }
 
+  function effectiveParticipants(stream) {
+    if (!stream) return 0;
+    const base = Number(stream.participants || 0) || 0;
+    const watchingBoost = (state.activeViewerAddress && stream.address === state.activeViewerAddress) ? 1 : 0;
+    return Math.max(0, base + watchingBoost);
+  }
+
+  function setActiveViewerAddress(address) {
+    const next = (address || '').trim();
+    if (state.activeViewerAddress === next) return;
+    state.activeViewerAddress = next;
+
+    renderLiveGrid();
+
+    const featured = heroFeaturedStreams();
+    if (featured.length) {
+      const idx = Math.min(state.featuredIndex, featured.length - 1);
+      if (idx >= 0) renderHero(featured[idx], idx, featured.length);
+    }
+
+    const selected = state.selectedStreamAddress && state.streamsByAddress.get(state.selectedStreamAddress);
+    if (selected) {
+      const viewers = qs('#theaterViewers');
+      if (viewers) viewers.textContent = formatCount(effectiveParticipants(selected));
+    }
+
+    if (window.renderRecoStreams) window.renderRecoStreams();
+  }
+
   function sortedLiveStreams() {
     return Array.from(state.streamsByAddress.values())
       .filter((s) => s.status !== 'ended')
       .sort((a, b) => {
         // Tier 1: has viewers > 0  →  Tier 2: has streaming URL but 0 viewers  →  Tier 3: no URL no viewers
-        const tierA = (a.participants || 0) > 0 ? 0 : (a.streaming ? 1 : 2);
-        const tierB = (b.participants || 0) > 0 ? 0 : (b.streaming ? 1 : 2);
+        const tierA = effectiveParticipants(a) > 0 ? 0 : (a.streaming ? 1 : 2);
+        const tierB = effectiveParticipants(b) > 0 ? 0 : (b.streaming ? 1 : 2);
         if (tierA !== tierB) return tierA - tierB;
         // Within same tier: higher viewers first
-        return (b.participants || 0) - (a.participants || 0);
+        return effectiveParticipants(b) - effectiveParticipants(a);
       });
   }
 
@@ -1148,7 +1444,8 @@
     // NIP-53: show actual streamer (hostPubkey), not the platform publisher
     const p = profileFor(stream.hostPubkey);
     const card = document.createElement('div');
-    const hasViewers = (stream.participants || 0) > 0;
+    const viewerCount = effectiveParticipants(stream);
+    const hasViewers = viewerCount > 0;
     const hasVideo = !!stream.streaming;
     card.className = 'stream-card' + (!hasViewers && !hasVideo ? ' stream-card-dim' : '');
 
@@ -1163,7 +1460,7 @@
 
     const statusLabel = stream.status === 'planned' ? 'SOON' : stream.status.toUpperCase();
     const statusBg = stream.status === 'planned' ? 'background:var(--purple)' : '';
-    const viewerText = hasViewers ? `&#128065; ${stream.participants.toLocaleString()}` : (hasVideo ? '&#128065; 0' : '&#8212;');
+    const viewerText = hasViewers ? `&#128065; ${viewerCount.toLocaleString()}` : (hasVideo ? '&#128065; 0' : '&#8212;');
 
     card.innerHTML = `
       <div class="ct">
@@ -1305,7 +1602,7 @@
 
   function heroFeaturedStreams() {
     return sortedLiveStreams().filter(
-      (s) => (s.participants || 0) >= 1 && !state.featuredFailed.has(s.address)
+      (s) => effectiveParticipants(s) >= 1 && !state.featuredFailed.has(s.address)
     );
   }
 
@@ -1489,11 +1786,12 @@
     const p = profileFor(stream.hostPubkey);
 
     const set = (id, v) => { const el = qs('#' + id); if (el) el.textContent = v; };
+    const viewerCount = effectiveParticipants(stream);
     set('heroTitle', stream.title);
     set('heroSummary', stream.summary || 'Live stream on Nostr.');
     set('heroHostName', p.name);
     set('heroStatusLabel', (stream.status || 'live').toUpperCase());
-    set('heroViewers', stream.participants ? stream.participants.toLocaleString() : '—');
+    set('heroViewers', viewerCount > 0 ? viewerCount.toLocaleString() : '—');
     set('heroSats', '—');
     set('heroTime', stream.starts ? new Date(stream.starts * 1000).toUTCString().slice(17, 22) + ' UTC' : 'live');
 
@@ -1779,7 +2077,7 @@
 
     // Stats — viewers & relays
     const viewers = qs('#theaterViewers');
-    if (viewers) viewers.textContent = formatCount(stream.participants || 0);
+    if (viewers) viewers.textContent = formatCount(effectiveParticipants(stream));
     const relays = qs('#theaterRelays');
     if (relays) relays.textContent = String(state.relays.length);
 
@@ -2266,7 +2564,10 @@
           renderLiveGrid();
           const sel = state.selectedStreamAddress && state.streamsByAddress.get(state.selectedStreamAddress);
           if (sel) renderVideo(sel);
-          if (state.selectedProfilePubkey === ev.pubkey) renderProfilePage(ev.pubkey);
+          if (state.selectedProfilePubkey === ev.pubkey) {
+            renderProfilePage(ev.pubkey);
+            syncProfileRoute(ev.pubkey, 'replace');
+          }
         }
       }
     );
@@ -2306,10 +2607,14 @@
         event: (ev) => {
           const stream = parseLiveEvent(ev);
           upsertStream(stream);
+          if (state.pendingRouteAddress && stream.address === state.pendingRouteAddress) {
+            tryOpenPendingRouteStream();
+          }
           debouncedRenderGrid();
         },
         eose: () => {
           renderLiveGrid();
+          tryOpenPendingRouteStream();
           if (!state.featuredCycleTimer) startHeroCycle();
           const streams = sortedLiveStreams();
           // Fetch profiles for both the event publisher AND actual streamer
@@ -2385,10 +2690,14 @@
     });
   }
 
-  function openStream(address) {
+  function openStream(address, opts = {}) {
+    const routeMode = opts.routeMode || 'push';
     const stream = state.streamsByAddress.get(address);
     if (!stream) return;
+    state.pendingRouteAddress = '';
+    state.pendingRouteNaddr = '';
     state.selectedStreamAddress = address;
+    if (routeMode !== 'skip') syncTheaterRoute(stream, routeMode);
     renderVideo(stream);
     subscribeChat(stream);
     window.showVideoPage();
@@ -3404,7 +3713,16 @@
   }
 
   function renderProfileFollowButton(pubkey) {
+    const isOwn = !!(pubkey && state.user && state.user.pubkey === pubkey);
+    const messageBtn = qs('#profileMessageBtn');
+    const zapBtn = qs('#profileZapBtn');
+    const editBtn = qs('#profileEditBtn');
     const btn = qs('#profileFollowBtn');
+
+    if (messageBtn) messageBtn.style.display = isOwn ? 'none' : '';
+    if (zapBtn) zapBtn.style.display = isOwn ? 'none' : '';
+    if (btn) btn.style.display = isOwn ? 'none' : '';
+    if (editBtn) editBtn.style.display = isOwn ? 'inline-flex' : 'none';
     if (!btn) return;
 
     btn.disabled = false;
@@ -3415,11 +3733,7 @@
       return;
     }
 
-    if (state.user && state.user.pubkey === pubkey) {
-      btn.textContent = 'You';
-      btn.disabled = true;
-      return;
-    }
+    if (isOwn) return;
 
     const following = isFollowingPubkey(pubkey);
     btn.textContent = following ? 'Following' : '+ Follow';
@@ -3639,11 +3953,12 @@
     openStream(state.selectedProfileLiveAddress);
   }
 
-  function showProfileByPubkey(pubkey) {
+  function showProfileByPubkey(pubkey, opts = {}) {
+    const routeMode = opts.routeMode || 'push';
     if (!pubkey) return;
     state.selectedProfilePubkey = pubkey;
     const p = profileFor(pubkey);
-    window.showProfile(p.name, pickAvatar(pubkey), formatNpubForDisplay(pubkey), p.nip05, pubkey);
+    window.showProfile(p.name, pickAvatar(pubkey), formatNpubForDisplay(pubkey), p.nip05, pubkey, { routeMode });
     renderProfilePage(pubkey);
     subscribeProfileFeed(pubkey);
     subscribeProfileStats(pubkey);
@@ -3761,6 +4076,7 @@
 
     if (state.selectedProfilePubkey === state.user.pubkey) {
       renderProfilePage(state.user.pubkey);
+      syncProfileRoute(state.user.pubkey, 'replace');
     }
   }
 
@@ -4227,10 +4543,13 @@
       }
     }
 
-    window.showPage = function (p) {
+    window.showPage = function (p, opts = {}) {
+      const routeMode = opts.routeMode || 'push';
       const home = qs('#homePage');
       const video = qs('#videoPage');
       const profile = qs('#profilePage');
+      if (p !== 'video') setActiveViewerAddress('');
+      if (p === 'home' && routeMode !== 'skip') syncHomeRoute(routeMode);
       if (home) home.classList.toggle('active', p === 'home');
       if (video) video.style.display = 'none';
       if (profile) profile.style.display = 'none';
@@ -4246,10 +4565,14 @@
       window.scrollTo(0, 0);
     };
 
-    window.showVideoPage = function () {
+    window.showVideoPage = function (opts = {}) {
+      const routeMode = opts.routeMode || 'replace';
       const home = qs('#homePage');
       const video = qs('#videoPage');
       const profile = qs('#profilePage');
+      const selected = state.selectedStreamAddress && state.streamsByAddress.get(state.selectedStreamAddress);
+      setActiveViewerAddress(selected ? selected.address : '');
+      if (selected && routeMode !== 'skip') syncTheaterRoute(selected, routeMode);
       if (home) home.classList.remove('active');
       if (video) video.style.display = 'block';
       if (profile) profile.style.display = 'none';
@@ -4262,10 +4585,12 @@
       window.scrollTo(0, 0);
     };
 
-    window.showProfile = function (name, av, npub, nip05, rawPubkey) {
+    window.showProfile = function (name, av, npub, nip05, rawPubkey, opts = {}) {
+      const routeMode = opts.routeMode || 'push';
       const home = qs('#homePage');
       const video = qs('#videoPage');
       const profile = qs('#profilePage');
+      setActiveViewerAddress('');
       if (home) home.classList.remove('active');
       if (video) video.style.display = 'none';
       if (profile) profile.style.display = 'block';
@@ -4311,11 +4636,13 @@
       }
 
       if (inferredPubkey) {
+        if (routeMode !== 'skip') syncProfileRoute(inferredPubkey, routeMode);
         state.selectedProfilePubkey = inferredPubkey;
         renderProfilePage(inferredPubkey);
         subscribeProfileFeed(inferredPubkey);
         subscribeProfileStats(inferredPubkey);
       } else {
+        if (routeMode !== 'skip') syncHomeRoute(routeMode);
         state.selectedProfilePubkey = null;
         state.selectedProfileLiveAddress = null;
         const liveWrap = qs('#profileLiveWrap');
@@ -4427,6 +4754,11 @@
         btn.textContent = 'Soon';
         setTimeout(() => { btn.textContent = original; }, 1200);
       }
+    };
+
+    window.openProfileEditSettings = function () {
+      window.openSettings();
+      window.switchSettingsTab('profile');
     };
 
     // ---- Add-to-List dropdown (NIP-51) ----
@@ -4546,8 +4878,10 @@
       const pubkey = state.selectedProfilePubkey;
       if (!pubkey) return;
 
+      syncProfileRoute(pubkey, 'replace');
       const npub = formatNpubForDisplay(pubkey);
-      const text = `Nostr profile: ${npub}`;
+      const fallbackUrl = npub.startsWith('npub1') ? `${window.location.origin}/${npub}` : window.location.href;
+      const text = isHomePath(window.location.pathname) ? fallbackUrl : window.location.href;
       try {
         if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
           await navigator.clipboard.writeText(text);
@@ -4574,7 +4908,7 @@
     };
 
     window.closeMini = window.hideMini;
-    window.returnToStream = function () { window.showVideoPage(); };
+    window.returnToStream = function () { window.showVideoPage({ routeMode: 'push' }); };
 
     window.openGoLive = function () {
       if (!state.user) {
@@ -4839,13 +5173,14 @@
       }
       others.forEach((s, i) => {
         const p = profileFor(s.hostPubkey);
+        const viewerCount = effectiveParticipants(s);
         const item = document.createElement('div');
         item.className = 'reco-item';
         item.innerHTML = `
           <div class="reco-thumb"><div class="tc ${thumbClasses[i % thumbClasses.length]}" style="height:100%;display:flex;align-items:center;justify-content:center;font-size:1.2rem;"></div></div>
           <div class="reco-text"><div class="rt"></div><div class="rs"></div></div>`;
         qs('.rt', item).textContent = s.title || 'Untitled stream';
-        qs('.rs', item).innerHTML = `${p.name || shortHex(s.hostPubkey)} — <span style="color:var(--live)">${s.participants ? s.participants.toLocaleString() + ' live' : 'live'}</span>`;
+        qs('.rs', item).innerHTML = `${p.name || shortHex(s.hostPubkey)} — <span style="color:var(--live)">${viewerCount > 0 ? viewerCount.toLocaleString() + ' live' : 'live'}</span>`;
         if (s.image) {
           const thumb = qs('.reco-thumb', item);
           thumb.innerHTML = `<img src="${s.image}" style="width:100%;height:100%;object-fit:cover;" loading="lazy">`;
@@ -5037,6 +5372,7 @@
       });
       setUserUi();
       stopAllAudio(null);
+      setActiveViewerAddress('');
       window.showPage('home');
     };
   }
@@ -5085,6 +5421,9 @@
     bindLegacyGlobals();
     initEmojiPicker();
     wireEvents();
+    window.addEventListener('popstate', () => {
+      syncViewFromLocation({ fallbackMode: 'skip' });
+    });
 
     const logoBtn = qs('#logoBtn');
     if (logoBtn) logoBtn.addEventListener('click', (e) => { e.stopPropagation(); window.toggleDD('logo'); });
@@ -5094,6 +5433,7 @@
     initRelay();
     await tryRestoreLocalLogin();
     setUserUi();
+    syncViewFromLocation({ fallbackMode: 'replace' });
 
     // Render saved external lists immediately (they come from localStorage)
     renderListFilterDD();
@@ -5102,32 +5442,6 @@
 
   document.addEventListener('DOMContentLoaded', init);
 })();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
