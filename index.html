@@ -328,6 +328,15 @@ nav {
 .action-btn.like-btn:hover,.action-btn.liked{border-color:var(--live);color:var(--live);background:rgba(255,59,92,.08);}
 .action-btn.share-btn:hover{border-color:var(--green);color:var(--green);}
 .action-btn.report-btn:hover{border-color:rgba(255,100,50,.5);color:rgba(255,100,50,.8);}
+.stream-reactions-row{display:flex;align-items:center;gap:.42rem;margin-top:.55rem;flex-wrap:wrap;}
+.stream-emoji-list{display:flex;align-items:center;gap:.34rem;flex-wrap:wrap;}
+.stream-emoji-add,.stream-emoji-chip{border:1px solid var(--border2);background:var(--surface2);color:var(--text2);border-radius:999px;font-family:'DM Mono',monospace;font-size:.68rem;display:inline-flex;align-items:center;gap:.24rem;cursor:pointer;transition:all .14s;}
+.stream-emoji-add{padding:.2rem .45rem;font-weight:700;}
+.stream-emoji-chip{padding:.2rem .5rem;}
+.stream-emoji-add:hover,.stream-emoji-chip:hover{border-color:var(--accent);color:var(--text);}
+.stream-emoji-chip.active{border-color:var(--green);color:var(--green);background:rgba(0,212,138,.1);}
+.stream-emoji-chip img{width:14px;height:14px;object-fit:contain;display:block;}
+.stream-emoji-count{font-size:.64rem;color:var(--text);}
 
 /* Stats row - followers now included here */
 .sib-stats-row{display:flex;gap:1rem;margin-top:.65rem;padding-top:.6rem;border-top:1px solid var(--border);align-items:center;flex-wrap:wrap;}
@@ -382,6 +391,7 @@ nav {
 .c-name-row{display:flex;align-items:center;gap:.28rem;flex-wrap:wrap;}
 .c-name{font-size:.7rem;font-weight:600;cursor:pointer;}
 .c-name:hover{text-decoration:underline;}
+.c-time{font-family:'DM Mono',monospace;font-size:.6rem;color:var(--muted);}
 .c-name.co{color:var(--accent);}
 .c-name.cp{color:var(--purple);}
 .c-name.cg{color:var(--green);}
@@ -393,6 +403,8 @@ nav {
 .cma-btn:hover{background:var(--surface2);color:var(--text);}
 .cma-btn.zap-cma:hover{color:var(--zap);}
 .cma-btn.like-cma:hover{color:var(--live);}
+.cma-btn.like-cma.active{color:var(--live);background:rgba(255,59,92,.1);}
+.chat-like-count{font-family:'DM Mono',monospace;font-size:.62rem;}
 .zap-ev{background:linear-gradient(135deg,rgba(247,183,49,.08),rgba(247,183,49,.03));border:1px solid rgba(247,183,49,.18);border-radius:8px;padding:.48rem .68rem;}
 .zap-ev .c-text{color:var(--zap);}
 
@@ -507,6 +519,11 @@ nav {
 .profile-feed-stats{display:flex;flex-wrap:wrap;gap:.44rem;margin-top:.55rem;}
 .pfs{padding:.17rem .42rem;border:1px solid var(--border);border-radius:999px;background:rgba(255,255,255,.02);font-size:.66rem;color:var(--text2);font-family:'DM Mono',monospace;}
 .pfs strong{color:var(--text);font-weight:600;}
+.pfs-btn{cursor:pointer;transition:all .14s;}
+.pfs-btn:hover{border-color:var(--accent);color:var(--text);}
+.pfs-btn.active{border-color:var(--live);color:var(--live);background:rgba(255,59,92,.08);}
+.pfs-plus{font-weight:700;padding:.17rem .55rem;}
+.profile-feed-emoji-bar{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.42rem;}
 .profile-feed-comments{display:flex;flex-direction:column;gap:.4rem;margin-top:.56rem;padding-top:.5rem;border-top:1px solid var(--border);}
 .profile-comment-item{display:flex;align-items:flex-start;gap:.45rem;}
 .profile-comment-av{width:24px;height:24px;border-radius:50%;background:var(--surface3);border:1px solid var(--border2);display:flex;align-items:center;justify-content:center;font-size:.68rem;overflow:hidden;flex-shrink:0;}
@@ -600,6 +617,8 @@ nav {
 .profile-comment-input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px rgba(232,70,10,.18);}
 .profile-comment-btn{background:var(--surface3);border:1px solid var(--border2);border-radius:8px;color:var(--text);font-size:.72rem;padding:.33rem .62rem;cursor:pointer;font-weight:600;}
 .profile-comment-btn:hover{border-color:var(--accent);color:var(--accent);}
+.profile-feed-photo.broken{display:flex;align-items:center;justify-content:center;background:#10151d;}
+.profile-feed-photo.broken span{font-size:.7rem;color:var(--text2);font-family:'DM Mono',monospace;}
 .profile-feed-empty{font-size:.78rem;color:var(--muted);padding:.75rem;border:1px dashed var(--border2);border-radius:8px;}
 .profile-media-card{padding:.72rem;}
 .profile-tab-row{display:flex;gap:.34rem;flex-wrap:wrap;padding:.24rem;background:var(--surface2);border:1px solid var(--border);border-radius:10px;margin-bottom:.62rem;}
@@ -904,6 +923,25 @@ body.no-chat-anim .cmsg{animation:none!important;}
 /* End confirm */
 .end-confirm-modal{background:var(--surface);border:1px solid rgba(255,59,92,.3);border-radius:16px;width:min(340px,94vw);padding:1.5rem;text-align:center;animation:slideUp .2s ease;position:relative;}
 .end-confirm-modal::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--live);border-radius:16px 16px 0 0;}
+.share-modal{width:min(520px,94vw);}
+.share-modal-body{padding:.95rem 1rem 1rem;display:flex;flex-direction:column;gap:.75rem;}
+.share-field{display:flex;flex-direction:column;gap:.28rem;}
+.share-field label{font-family:'DM Mono',monospace;font-size:.64rem;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;}
+.share-copy-row{display:flex;gap:.45rem;}
+.share-copy-row input{flex:1;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:.42rem .55rem;color:var(--text);font-size:.74rem;font-family:'DM Mono',monospace;outline:none;}
+.share-copy-row input:focus{border-color:var(--accent);}
+.share-choice-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.45rem;}
+.share-choice-btn{background:var(--surface2);border:1px solid var(--border2);border-radius:10px;padding:.58rem .42rem;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:.24rem;color:var(--text);font-size:.72rem;font-weight:600;}
+.share-choice-btn:hover{border-color:var(--accent);}
+.share-choice-btn .sub{font-size:.62rem;color:var(--text2);font-weight:400;}
+.reaction-picker-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:.4rem;}
+.reaction-opt-btn{background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:.45rem .2rem;cursor:pointer;color:var(--text);font-size:.88rem;display:flex;align-items:center;justify-content:center;min-height:34px;}
+.reaction-opt-btn img{width:18px;height:18px;object-fit:contain;display:block;}
+.reaction-opt-btn:hover{border-color:var(--accent);}
+.reaction-custom-row{display:flex;flex-direction:column;gap:.42rem;}
+.reaction-custom-row input{background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:.42rem .55rem;color:var(--text);font-size:.74rem;font-family:'DM Mono',monospace;outline:none;}
+.reaction-custom-row input:focus{border-color:var(--accent);}
+.reaction-picker-foot{display:flex;justify-content:flex-end;gap:.5rem;}
 
 /* ======== ONBOARDING MODAL ======== */
 .onboard-modal{width:min(580px,96vw);max-height:92vh;overflow-y:auto;padding:1.4rem 1.5rem 1.5rem;}
@@ -1715,6 +1753,54 @@ footer p{font-size:.72rem;color:var(--muted);}
   </div>
 </div>
 
+<!-- ========= SHARE MODAL ========= -->
+<div class="modal-ov" id="shareModal">
+  <div class="settings-modal share-modal">
+    <button class="mclose" style="position:absolute;top:1rem;right:1rem;" onclick="closeShareModal()">x</button>
+    <div class="sm-hd"><div class="sm-title">Share Stream</div></div>
+    <div class="share-modal-body">
+      <div class="share-choice-grid">
+        <button class="share-choice-btn" onclick="shareStreamAction('boost')"><span>Boost</span><span class="sub">Post to Nostr</span></button>
+        <button class="share-choice-btn" onclick="shareStreamAction('copy')"><span>Copy Link</span><span class="sub">Web URL</span></button>
+        <button class="share-choice-btn" onclick="shareStreamAction('app')"><span>Share App</span><span class="sub">Text / App</span></button>
+      </div>
+      <div class="share-field">
+        <label>Web URL</label>
+        <div class="share-copy-row">
+          <input id="shareWebUrl" type="text" readonly>
+          <button class="btn btn-ghost" style="padding:.34rem .62rem;" onclick="copyShareField('shareWebUrl')">Copy</button>
+        </div>
+      </div>
+      <div class="share-field">
+        <label>Nostr naddr</label>
+        <div class="share-copy-row">
+          <input id="shareNaddr" type="text" readonly>
+          <button class="btn btn-ghost" style="padding:.34rem .62rem;" onclick="copyShareField('shareNaddr')">Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========= REACTION PICKER ========= -->
+<div class="modal-ov" id="reactionPickerModal">
+  <div class="settings-modal share-modal">
+    <button class="mclose" style="position:absolute;top:1rem;right:1rem;" onclick="closeReactionPicker()">x</button>
+    <div class="sm-hd"><div class="sm-title">React With Emoji</div></div>
+    <div class="share-modal-body">
+      <div class="reaction-picker-grid" id="reactionPickerGrid"></div>
+      <div class="reaction-custom-row">
+        <input id="reactionPickerCode" type="text" placeholder="Emoji or :shortcode:">
+        <input id="reactionPickerUrl" type="text" placeholder="Custom emoji image URL (optional for :shortcode:)">
+      </div>
+      <div class="reaction-picker-foot">
+        <button class="btn btn-ghost" onclick="closeReactionPicker()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitCustomReactionPicker()">Send</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ========= HOME PAGE ========= -->
 <div class="page active" id="homePage">
   <div class="hero-stream" id="heroStream">
@@ -1857,11 +1943,15 @@ footer p{font-size:.72rem;color:var(--muted);}
           </div>
           <div class="sib-actions-row">
             <button class="btn btn-zap" id="theaterZapBtn" style="padding:.36rem .8rem;font-size:.79rem;" onclick="theaterZap()">⚡ Zap</button>
-            <button class="btn btn-follow" id="theaterFollowBtn" style="padding:.36rem .8rem;font-size:.79rem;" onclick="toggleTheaterFollow()">+ Follow</button>
+            <button class="btn btn-follow" id="theaterFollowBtn" style="padding:.36rem .8rem;font-size:.79rem;" onclick="toggleTheaterFollow()">Follow</button>
             <button class="action-btn share-btn" onclick="shareStream()">📤 Share</button>
             <button class="action-btn like-btn" id="likeBtn" onclick="toggleLike()">❤ <span id="likeCount">0</span></button>
             <button class="action-btn report-btn" title="Report stream">⚑</button>
           </div>
+        </div>
+        <div class="stream-reactions-row">
+          <button class="stream-emoji-add" id="streamEmojiAddBtn" onclick="openReactionPickerForStream()">+</button>
+          <div class="stream-emoji-list" id="streamEmojiList"></div>
         </div>
 
         <!-- Host row (avatar + name/nip05 + hosted-via pill injected by JS) -->
@@ -1983,7 +2073,7 @@ footer p{font-size:.72rem;color:var(--muted);}
           <div class="profile-actions-row">
             <button class="btn btn-ghost" id="profileMessageBtn" onclick="openProfileMessage()">Message</button>
             <button class="btn btn-zap" id="profileZapBtn">Zap</button>
-            <button class="btn btn-follow" id="profileFollowBtn" onclick="toggleFollowProfile()">+ Follow</button>
+            <button class="btn btn-follow" id="profileFollowBtn" onclick="toggleFollowProfile()">Follow</button>
             <button class="btn btn-primary" id="profileEditBtn" onclick="openProfileEditSettings()" style="display:none;">Edit Profile</button>
             <div class="atl-wrap" id="atlWrap">
               <button class="btn btn-ghost" id="profileAddToListBtn" onclick="toggleAtlDropdown(event)">Add to List ▾</button>
@@ -2113,11 +2203,6 @@ footer p{font-size:.72rem;color:var(--muted);}
 <script src="./nostrflux-app.js"></script>
 </body>
 </html>
-
-
-
-
-
 
 
 

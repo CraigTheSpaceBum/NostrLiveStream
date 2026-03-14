@@ -1,4 +1,4 @@
-(function () {
+﻿(function () {
   const DEFAULT_RELAYS = [
     'wss://relay.damus.io',
     'wss://nos.lol',
@@ -8,6 +8,7 @@
   ];
 
   const KIND_PROFILE = 0;
+  const KIND_DELETION = 5;
   const KIND_CONTACTS = 3;
   const KIND_REACTION = 7;
   const KIND_LIVE_EVENT = 30311;
@@ -70,6 +71,11 @@
     relayPulseTimer: null,
     followedPubkeys: new Set(),
     contactListPubkeys: new Set(),          // from kind:3 contact list
+    contactsLatestCreatedAt: 0,
+    contactsContent: '',
+    contactsPTagByPubkey: new Map(),
+    contactsOtherTags: [],
+    followPublishPending: false,
     nip51Lists: new Map(),                  // listId -> { name, pubkeys, kind, d }
     savedExternalLists: [],                 // [{ naddr, name, pubkeys }] from Liststr/external
     activeListFilter: 'all',               // 'all' | 'following' | 'contacts' | listId | naddr
@@ -78,6 +84,7 @@
     heroHlsInstance: null,
     heroPlaybackToken: 0,
     featuredIndex: 0,
+    featuredCurrentAddress: '',
     featuredCycleTimer: null,
     featuredCycleStart: 0,
     featuredCycleRafId: null,
@@ -90,7 +97,26 @@
     streamZapTotals: new Map(),
     _theaterRuntimeInterval: null,
     likedStreamAddresses: new Set(),  // tracks which streams the user has liked
+    streamLikeEventIdByAddress: new Map(),
+    streamLikePublishPending: false,
+    streamReactionPubkeysByKey: new Map(),
+    streamReactionMetaByKey: new Map(),
+    streamReactionIdByKeyAndPubkey: new Map(),
+    streamReactionEventById: new Map(),
+    streamOwnReactionIdByKey: new Map(),
+    streamReactionPublishPendingByKey: new Set(),
+    chatReactionSubId: null,
+    chatLikePubkeysByMessageId: new Map(),
+    chatReactionIdByMessageAndPubkey: new Map(),
+    chatReactionEventById: new Map(), // reactionEventId -> { messageId, pubkey }
+    chatOwnLikeEventByMessageId: new Map(),
+    chatMessageEventsById: new Map(),
+    chatLikePublishPendingByMessageId: new Set(),
+    postReactionPublishPendingByNoteAndKey: new Set(),
+    reactionPickerTarget: null,
+    shareModalStreamAddress: '',
     activeViewerAddress: '',
+    activeHeroViewerAddress: '',
     pendingRouteAddress: '',
     pendingRouteNaddr: ''
   };
@@ -406,6 +432,11 @@
     }
   }
 
+  function normalizePubkeyHex(pubkey) {
+    const normalized = (pubkey || '').trim().toLowerCase();
+    return /^[0-9a-f]{64}$/.test(normalized) ? normalized : '';
+  }
+
   function loadFollowedPubkeys() {
     let saved = [];
     try {
@@ -418,8 +449,8 @@
     const list = Array.isArray(saved) ? saved : [];
     state.followedPubkeys = new Set(
       list
-        .map((v) => (typeof v === 'string' ? v.trim() : ''))
-        .filter((v) => /^[0-9a-f]{64}$/i.test(v))
+        .map((v) => normalizePubkeyHex(typeof v === 'string' ? v : ''))
+        .filter(Boolean)
     );
   }
 
@@ -432,14 +463,78 @@
   }
 
   function isFollowingPubkey(pubkey) {
-    return !!(pubkey && state.followedPubkeys.has(pubkey));
+    const normalized = normalizePubkeyHex(pubkey);
+    return !!(normalized && state.followedPubkeys.has(normalized));
   }
 
   function setFollowingPubkey(pubkey, on) {
-    if (!pubkey) return;
-    if (on) state.followedPubkeys.add(pubkey);
-    else state.followedPubkeys.delete(pubkey);
+    const normalized = normalizePubkeyHex(pubkey);
+    if (!normalized) return;
+    if (on) state.followedPubkeys.add(normalized);
+    else state.followedPubkeys.delete(normalized);
     persistFollowedPubkeys();
+    renderFollowingCount();
+  }
+
+  function captureContactsMetadata(ev) {
+    if (!ev || ev.kind !== KIND_CONTACTS) return false;
+    const created = Number(ev.created_at || 0) || 0;
+    if (created < (state.contactsLatestCreatedAt || 0)) return false;
+
+    state.contactsLatestCreatedAt = created;
+    state.contactsContent = typeof ev.content === 'string' ? ev.content : '';
+    state.contactsPTagByPubkey = new Map();
+    state.contactsOtherTags = [];
+
+    (ev.tags || []).forEach((tag) => {
+      if (!Array.isArray(tag) || !tag.length) return;
+      if (tag[0] === 'p' && tag[1]) {
+        const pk = normalizePubkeyHex(tag[1]);
+        if (!pk) return;
+        const cloned = [...tag];
+        cloned[1] = pk;
+        state.contactsPTagByPubkey.set(pk, cloned);
+      } else {
+        state.contactsOtherTags.push([...tag]);
+      }
+    });
+
+    return true;
+  }
+
+  function buildContactsTagsFromFollowedSet() {
+    const tags = [];
+    (state.contactsOtherTags || []).forEach((t) => {
+      if (!Array.isArray(t) || !t.length || t[0] === 'p') return;
+      tags.push([...t]);
+    });
+
+    const followed = Array.from(state.followedPubkeys)
+      .map((pk) => normalizePubkeyHex(pk))
+      .filter(Boolean)
+      .sort();
+
+    followed.forEach((pk) => {
+      const existing = state.contactsPTagByPubkey && state.contactsPTagByPubkey.get(pk);
+      if (Array.isArray(existing) && existing.length >= 2 && existing[0] === 'p') {
+        const cloned = [...existing];
+        cloned[1] = pk;
+        tags.push(cloned);
+      } else {
+        tags.push(['p', pk]);
+      }
+    });
+
+    return tags;
+  }
+
+  async function publishFollowedPubkeysToNostr() {
+    if (!state.user) throw new Error('Please login first to publish your follow list.');
+    const tags = buildContactsTagsFromFollowedSet();
+    const content = typeof state.contactsContent === 'string' ? state.contactsContent : '';
+    const ev = await signAndPublish(KIND_CONTACTS, content, tags);
+    captureContactsMetadata(ev);
+    return ev;
   }
 
   function applySettingsToDocument() {
@@ -457,7 +552,7 @@
     state.settings.relays.forEach((relay) => {
       const tag = document.createElement('div');
       tag.className = 'relay-tag';
-      tag.innerHTML = `${relay} <button class="rem" title="Remove">✕</button>`;
+      tag.innerHTML = `${relay} <button class="rem" title="Remove">âœ•</button>`;
       const btn = qs('.rem', tag);
       if (btn) btn.addEventListener('click', () => removeRelayFromSettings(relay));
       wrap.appendChild(tag);
@@ -1082,21 +1177,30 @@
   function effectiveParticipants(stream) {
     if (!stream) return 0;
     const base = Number(stream.participants || 0) || 0;
-    const watchingBoost = (state.activeViewerAddress && stream.address === state.activeViewerAddress) ? 1 : 0;
+    const watchingBoost = (
+      (state.activeViewerAddress && stream.address === state.activeViewerAddress)
+      || (state.activeHeroViewerAddress && stream.address === state.activeHeroViewerAddress)
+    ) ? 1 : 0;
     return Math.max(0, base + watchingBoost);
   }
 
-  function setActiveViewerAddress(address) {
-    const next = (address || '').trim();
-    if (state.activeViewerAddress === next) return;
-    state.activeViewerAddress = next;
-
+  function refreshParticipantDependentUi() {
     renderLiveGrid();
 
     const featured = heroFeaturedStreams();
     if (featured.length) {
-      const idx = Math.min(state.featuredIndex, featured.length - 1);
-      if (idx >= 0) renderHero(featured[idx], idx, featured.length);
+      let idx = Math.min(Math.max(0, state.featuredIndex), featured.length - 1);
+      if (state.featuredCurrentAddress) {
+        const currentIdx = featured.findIndex((s) => s.address === state.featuredCurrentAddress);
+        if (currentIdx >= 0) idx = currentIdx;
+      }
+      state.featuredIndex = idx;
+      renderHeroIndicators(featured, idx);
+      const heroViewers = qs('#heroViewers');
+      if (heroViewers) {
+        const viewerCount = effectiveParticipants(featured[idx]);
+        heroViewers.textContent = viewerCount > 0 ? viewerCount.toLocaleString() : '-';
+      }
     }
 
     const selected = state.selectedStreamAddress && state.streamsByAddress.get(state.selectedStreamAddress);
@@ -1108,11 +1212,25 @@
     if (window.renderRecoStreams) window.renderRecoStreams();
   }
 
+  function setActiveViewerAddress(address) {
+    const next = (address || '').trim();
+    if (state.activeViewerAddress === next) return;
+    state.activeViewerAddress = next;
+    refreshParticipantDependentUi();
+  }
+
+  function setActiveHeroViewerAddress(address) {
+    const next = (address || '').trim();
+    if (state.activeHeroViewerAddress === next) return;
+    state.activeHeroViewerAddress = next;
+    refreshParticipantDependentUi();
+  }
+
   function sortedLiveStreams() {
     return Array.from(state.streamsByAddress.values())
       .filter((s) => s.status !== 'ended')
       .sort((a, b) => {
-        // Tier 1: has viewers > 0  →  Tier 2: has streaming URL but 0 viewers  →  Tier 3: no URL no viewers
+        // Tier 1: has viewers > 0  â†’  Tier 2: has streaming URL but 0 viewers  â†’  Tier 3: no URL no viewers
         const tierA = effectiveParticipants(a) > 0 ? 0 : (a.streaming ? 1 : 2);
         const tierB = effectiveParticipants(b) > 0 ? 0 : (b.streaming ? 1 : 2);
         if (tierA !== tierB) return tierA - tierB;
@@ -1168,24 +1286,52 @@
 
   // Subscribe to user's kind:3 (contacts) and kind:30000 (people lists)
   function subscribeUserLists(pubkey) {
-    if (!pubkey) return;
+    const normalizedUser = normalizePubkeyHex(pubkey);
+    if (!normalizedUser) return;
 
     // Unsubscribe old
     if (state.nip51SubId) { state.pool.unsubscribe(state.nip51SubId); state.nip51SubId = null; }
     if (state.contactsSubId) { state.pool.unsubscribe(state.contactsSubId); state.contactsSubId = null; }
+    let latestContactsCreated = 0;
 
     // Kind 3: contact list
     state.contactsSubId = state.pool.subscribe(
-      [{ kinds: [KIND_CONTACTS], authors: [pubkey], limit: 1 }],
+      [{ kinds: [KIND_CONTACTS], authors: [normalizedUser], limit: 10 }],
       {
         event: (ev) => {
           if (ev.kind !== KIND_CONTACTS) return;
+          const created = Number(ev.created_at || 0) || 0;
+          if (created < latestContactsCreated) return;
+          latestContactsCreated = created;
+
+          if (!captureContactsMetadata(ev)) return;
+
           const pubs = (ev.tags || [])
-            .filter((t) => t[0] === 'p' && t[1] && /^[0-9a-f]{64}$/i.test(t[1]))
-            .map((t) => t[1]);
+            .map((t) => (Array.isArray(t) && t[0] === 'p' ? normalizePubkeyHex(t[1]) : ''))
+            .filter(Boolean);
           state.contactListPubkeys = new Set(pubs);
-          const cnt = qs('#lfFollowingCount');
-          if (cnt) cnt.textContent = pubs.length || '';
+
+          // Keep app follow state in sync with relay-backed contact list for the logged-in user.
+          if (state.user && normalizePubkeyHex(state.user.pubkey) === normalizedUser) {
+            state.followedPubkeys = new Set(pubs);
+            persistFollowedPubkeys();
+            renderFollowingCount();
+
+            const ownStats = state.profileStatsByPubkey.get(normalizedUser) || { followers: 0, following: 0 };
+            state.profileStatsByPubkey.set(normalizedUser, {
+              followers: Number(ownStats.followers || 0),
+              following: pubs.length
+            });
+            if (normalizePubkeyHex(state.selectedProfilePubkey) === normalizedUser) {
+              const followingEl = qs('#profFollowing');
+              if (followingEl) followingEl.textContent = formatCount(pubs.length);
+            }
+
+            const selectedStream = state.selectedStreamAddress && state.streamsByAddress.get(state.selectedStreamAddress);
+            if (selectedStream && selectedStream.hostPubkey) updateTheaterFollowBtn(selectedStream.hostPubkey);
+            if (state.selectedProfilePubkey) renderProfileFollowButton(state.selectedProfilePubkey);
+          }
+
           renderLiveGrid();
         }
       }
@@ -1193,7 +1339,7 @@
 
     // Kind 30000: NIP-51 people lists
     state.nip51SubId = state.pool.subscribe(
-      [{ kinds: [KIND_PEOPLE_LIST], authors: [pubkey], limit: 50 }],
+      [{ kinds: [KIND_PEOPLE_LIST], authors: [normalizedUser], limit: 50 }],
       {
         event: (ev) => {
           if (ev.kind !== KIND_PEOPLE_LIST) return;
@@ -1219,7 +1365,7 @@
     naddr = naddr.split(/[?#]/)[0].trim();
 
     if (!naddr.startsWith('naddr1')) {
-      if (onDone) onDone(null, new Error('Not a valid naddr. Paste an naddr1… or a listr.lol URL.'));
+      if (onDone) onDone(null, new Error('Not a valid naddr. Paste an naddr1â€¦ or a listr.lol URL.'));
       return;
     }
 
@@ -1425,7 +1571,7 @@
     if (!val) return;
 
     const btn = qs('.lf-add-btn');
-    if (btn) { btn.textContent = '…'; btn.disabled = true; }
+    if (btn) { btn.textContent = 'â€¦'; btn.disabled = true; }
 
     subscribeExternalList(val, (entry, err) => {
       if (btn) { btn.textContent = 'Add'; btn.disabled = false; }
@@ -1530,7 +1676,7 @@
 
     // Loading state
     if (allStreams.length === 0) {
-      grid.innerHTML = '<div class="live-grid-loading"><div class="lf-spinner"></div>Syncing streams from relays…</div>';
+      grid.innerHTML = '<div class="live-grid-loading"><div class="lf-spinner"></div>Syncing streams from relaysâ€¦</div>';
       return;
     }
 
@@ -1545,7 +1691,7 @@
           if (sv) return `"${sv.name}"`;
           return 'this filter';
         })();
-      grid.innerHTML = `<div class="following-empty" style="grid-column:1/-1"><div class="following-empty-icon">📡</div><div class="following-empty-title">No live streams in ${filterName}</div><div class="following-empty-sub">Nobody in this list is streaming right now.</div></div>`;
+      grid.innerHTML = `<div class="following-empty" style="grid-column:1/-1"><div class="following-empty-icon">ðŸ“¡</div><div class="following-empty-title">No live streams in ${filterName}</div><div class="following-empty-sub">Nobody in this list is streaming right now.</div></div>`;
       return;
     }
 
@@ -1593,16 +1739,20 @@
 
   /* =========================================================
      HERO FEATURED STREAM SYSTEM
-     - Only features streams with participants >= 1
+     - Randomly features available live streams
      - Autoplay with AUDIO (muted only if browser blocks)
      - Skips streams where playback fails
      - Sci-fi glitch/scan-line transition between streams
-     - Cycles every 60 s with progress bar; prev/next nav
+     - Cycles every 120 s with progress bar; prev/next nav
      ========================================================= */
+  const HERO_CYCLE_MS = 120000;
 
   function heroFeaturedStreams() {
     return sortedLiveStreams().filter(
-      (s) => effectiveParticipants(s) >= 1 && !state.featuredFailed.has(s.address)
+      (s) => {
+        const url = (s.streaming || '').trim();
+        return url && /^https?:\/\//i.test(url) && !state.featuredFailed.has(s.address);
+      }
     );
   }
 
@@ -1657,7 +1807,7 @@
 
     function tick() {
       const elapsed = Date.now() - state.featuredCycleStart;
-      const pct = Math.min((elapsed / 60000) * 100, 100);
+      const pct = Math.min((elapsed / HERO_CYCLE_MS) * 100, 100);
       fill.style.width = pct + '%';
       if (pct < 100) {
         state.featuredCycleRafId = requestAnimationFrame(tick);
@@ -1684,6 +1834,8 @@
   /* ---- Clear hero HLS ---- */
   function clearHeroPlayback() {
     state.heroPlaybackToken++;
+    state.featuredCurrentAddress = '';
+    setActiveHeroViewerAddress('');
     if (state.heroHlsInstance) {
       try { state.heroHlsInstance.destroy(); } catch (_) {}
       state.heroHlsInstance = null;
@@ -1712,7 +1864,10 @@
     if (existingVid) existingVid.remove();
     if (ovEl) ovEl.style.display = '';
 
-    if (!url || !/^https?:\/\//i.test(url)) return;
+    if (!url || !/^https?:\/\//i.test(url)) {
+      setActiveHeroViewerAddress('');
+      return;
+    }
 
     const video = document.createElement('video');
     // Start muted so browser allows autoplay, then unmute immediately
@@ -1725,18 +1880,20 @@
     const isHls = /\.m3u8($|\?)/i.test(url);
     let hlsObj = null;
 
-    // On media loaded / playing → unmute for audio
+    // On media loaded / playing â†’ unmute for audio
     const onCanPlay = () => {
       if (token !== state.heroPlaybackToken) return;
+      setActiveHeroViewerAddress(stream.address);
       video.muted = false; // restore audio
       video.volume = 0.8;
       if (ovEl) ovEl.style.display = 'none';
     };
     video.addEventListener('canplay', onCanPlay, { once: true });
 
-    // On error → mark as failed and advance
+    // On error â†’ mark as failed and advance
     video.addEventListener('error', () => {
       if (token !== state.heroPlaybackToken) return;
+      setActiveHeroViewerAddress('');
       state.featuredFailed.add(stream.address);
       heroAdvance(1); // skip to next
     });
@@ -1762,6 +1919,7 @@
             });
             hlsObj.on(Hls.Events.ERROR, (_e, data) => {
               if (data && data.fatal && token === state.heroPlaybackToken) {
+                setActiveHeroViewerAddress('');
                 state.featuredFailed.add(stream.address);
                 heroAdvance(1);
               }
@@ -1769,6 +1927,7 @@
           }
         } catch (_) {
           if (token === state.heroPlaybackToken) {
+            setActiveHeroViewerAddress('');
             state.featuredFailed.add(stream.address);
             heroAdvance(1);
           }
@@ -1783,6 +1942,7 @@
   /* ---- Render hero info panel ---- */
   function renderHero(stream, idx, total) {
     if (!stream) return;
+    state.featuredCurrentAddress = stream.address;
     const p = profileFor(stream.hostPubkey);
 
     const set = (id, v) => { const el = qs('#' + id); if (el) el.textContent = v; };
@@ -1791,8 +1951,8 @@
     set('heroSummary', stream.summary || 'Live stream on Nostr.');
     set('heroHostName', p.name);
     set('heroStatusLabel', (stream.status || 'live').toUpperCase());
-    set('heroViewers', viewerCount > 0 ? viewerCount.toLocaleString() : '—');
-    set('heroSats', '—');
+    set('heroViewers', viewerCount > 0 ? viewerCount.toLocaleString() : 'â€”');
+    set('heroSats', 'â€”');
     set('heroTime', stream.starts ? new Date(stream.starts * 1000).toUTCString().slice(17, 22) + ' UTC' : 'live');
 
     const avEl = qs('#heroAv');
@@ -1841,11 +2001,11 @@
     resetHeroCycle();
   }
 
-  /* ---- Reset / restart the 60-s cycle timer ---- */
+  /* ---- Reset / restart the 120-s cycle timer ---- */
   function resetHeroCycle() {
     if (state.featuredCycleTimer) clearInterval(state.featuredCycleTimer);
     startProgressBar();
-    state.featuredCycleTimer = setInterval(() => heroAdvance(1), 60000);
+    state.featuredCycleTimer = setInterval(() => heroAdvance(1), HERO_CYCLE_MS);
   }
 
   /* ---- Start hero cycle on page load ---- */
@@ -2075,33 +2235,33 @@
       }
     }
 
-    // Stats — viewers & relays
+    // Stats â€” viewers & relays
     const viewers = qs('#theaterViewers');
     if (viewers) viewers.textContent = formatCount(effectiveParticipants(stream));
     const relays = qs('#theaterRelays');
     if (relays) relays.textContent = String(state.relays.length);
 
-    // Sats — sum of zaps received on this stream (if tracked), else show '—'
+    // Sats â€” sum of zaps received on this stream (if tracked), else show 'â€”'
     const satsEl = qs('#theaterSats');
     if (satsEl) {
       const zapTotal = state.streamZapTotals && state.streamZapTotals.get(stream.address);
-      satsEl.textContent = zapTotal != null ? formatCount(zapTotal) : '—';
+      satsEl.textContent = zapTotal != null ? formatCount(zapTotal) : 'â€”';
     }
 
-    // Followers — fetch from profileStats if already loaded
+    // Followers â€” fetch from profileStats if already loaded
     const followersEl = qs('#theaterFollowers');
     if (followersEl) {
       const stats = state.profileStatsByPubkey && state.profileStatsByPubkey.get(stream.pubkey);
-      followersEl.textContent = stats ? formatCount(stats.followers || 0) : '—';
+      followersEl.textContent = stats ? formatCount(stats.followers || 0) : 'â€”';
     }
 
-    // Runtime counter — ticks every second from stream.starts
+    // Runtime counter â€” ticks every second from stream.starts
     clearInterval(state._theaterRuntimeInterval);
     const runtimeEl = qs('#theaterRuntime');
     if (runtimeEl) {
       const updateRuntime = () => {
         const startTs = stream.starts || stream.created_at;
-        if (!startTs) { runtimeEl.textContent = '—'; return; }
+        if (!startTs) { runtimeEl.textContent = 'â€”'; return; }
         const secs = Math.max(0, Math.floor(Date.now() / 1000) - startTs);
         const h = Math.floor(secs / 3600);
         const m = Math.floor((secs % 3600) / 60);
@@ -2114,14 +2274,13 @@
       state._theaterRuntimeInterval = setInterval(updateRuntime, 1000);
     }
 
-    // Like button — reflect per-stream like state
+    // Like button â€” reflect per-stream like state
     const likeBtn = qs('#likeBtn');
-    const likeCount = qs('#likeCount');
     const isLiked = state.likedStreamAddresses.has(stream.address);
     if (likeBtn) likeBtn.classList.toggle('liked', isLiked);
-    if (likeCount) likeCount.textContent = '0';
+    renderStreamReactionsUi(stream);
 
-    // Follow button — reflect current follow state
+    // Follow button â€” reflect current follow state
     updateTheaterFollowBtn(stream.hostPubkey);
 
     renderVideoPlayback(stream);
@@ -2137,8 +2296,8 @@
   function updateTheaterFollowBtn(pubkey) {
     const btn = qs('#theaterFollowBtn');
     if (!btn) return;
-    const isFollowing = !!(state.followedPubkeys && state.followedPubkeys.has(pubkey));
-    btn.textContent = isFollowing ? '✓ Unfollow' : '+ Follow';
+    const isFollowing = isFollowingPubkey(pubkey);
+    btn.textContent = isFollowing ? 'âœ“ Unfollow' : 'Follow';
     btn.classList.toggle('following-active', isFollowing);
   }
 
@@ -2180,7 +2339,7 @@
 
     const streams = sortedLiveStreams().filter((s) => s.title.toLowerCase().includes(term) || profileFor(s.hostPubkey).name.toLowerCase().includes(term)).slice(0, 5);
 
-    // Local cache match — all cached profiles, not just streamers
+    // Local cache match â€” all cached profiles, not just streamers
     const localProfiles = Array.from(state.profilesByPubkey.values()).filter((p) => {
       const t = term.toLowerCase();
       return (p.name || '').toLowerCase().includes(t) ||
@@ -2224,7 +2383,7 @@
       // --- Users ---
       const userLabel = document.createElement('span');
       userLabel.className = 'sr-label';
-      userLabel.textContent = merged.length ? 'Users' : 'Searching Nostr…';
+      userLabel.textContent = merged.length ? 'Users' : 'Searching Nostrâ€¦';
       box.appendChild(userLabel);
 
       merged.slice(0, 8).forEach((p) => {
@@ -2243,7 +2402,7 @@
       const extraProfiles = [];
       const relayResults = new Map(); // pubkey -> event
 
-      // 1. If looks like npub → decode + fetch by pubkey
+      // 1. If looks like npub â†’ decode + fetch by pubkey
       const npubMatch = term.match(/^npub1[023456789acdefghjklmnpqrstuvwxyz]{6,}/i);
       if (npubMatch) {
         try {
@@ -2265,7 +2424,7 @@
         return;
       }
 
-      // 2. If looks like nip-05 (contains @) → resolve via .well-known
+      // 2. If looks like nip-05 (contains @) â†’ resolve via .well-known
       if (term.includes('@') && term.split('@').length === 2) {
         const [localPart, domain] = term.split('@');
         if (localPart && domain && domain.includes('.')) {
@@ -2290,7 +2449,7 @@
         }
       }
 
-      // 3. General text search — use NIP-50 search filter (supported by many relays)
+      // 3. General text search â€” use NIP-50 search filter (supported by many relays)
       //    Also fetch recent kind:0 events and filter locally
       const filters = [];
       if (term.length >= 2) {
@@ -2324,10 +2483,10 @@
   }
 
   /* =====================================================================
-     NIP-21 CONTENT RENDERING — nostr:npub / nprofile / nevent / note
+     NIP-21 CONTENT RENDERING â€” nostr:npub / nprofile / nevent / note
      Parses inline nostr: entities per NIP-21 and renders them as:
-     - npub1 / nprofile1 → clickable @mention pill (fetches profile)
-     - nevent1 / note1   → embedded quoted note card (fetches event + author)
+     - npub1 / nprofile1 â†’ clickable @mention pill (fetches profile)
+     - nevent1 / note1   â†’ embedded quoted note card (fetches event + author)
      ===================================================================== */
 
   function _decodeNostrEntity(entity) {
@@ -2384,7 +2543,7 @@
   function _buildNeventCard(entity) {
     const card = document.createElement('div');
     card.className = 'nevent-embed-card';
-    card.textContent = 'Loading quoted note…';
+    card.textContent = 'Loading quoted noteâ€¦';
 
     const doLoad = () => {
       const decoded = _decodeNostrEntity(entity);
@@ -2415,7 +2574,7 @@
           body.className = 'nevent-embed-body';
           const mediaUrls = extractMediaUrlsFromEvent(ev);
           const previewText = stripMediaUrlsFromText(ev.content || '', mediaUrls);
-          body.textContent = previewText.slice(0, 280) + (previewText.length > 280 ? '…' : '');
+          body.textContent = previewText.slice(0, 280) + (previewText.length > 280 ? 'â€¦' : '');
 
           card.appendChild(header);
           card.appendChild(body);
@@ -2433,7 +2592,7 @@
     return card;
   }
 
-  // Main content renderer — returns a DocumentFragment safe for appending to DOM
+  // Main content renderer â€” returns a DocumentFragment safe for appending to DOM
   function renderNostrContent(text) {
     const frag = document.createDocumentFragment();
     if (!text) return frag;
@@ -2453,7 +2612,7 @@
         } else {
           const pill = document.createElement('span');
           pill.className = 'nostr-mention-pill';
-          pill.textContent = '@' + entity.slice(0, 12) + '…';
+          pill.textContent = '@' + entity.slice(0, 12) + 'â€¦';
           frag.appendChild(pill);
           ensureNostrTools().then(() => {
             const decoded = _decodeNostrEntity(entity);
@@ -2479,14 +2638,626 @@
 
   /* ===================================================================== */
 
+  function firstTagValue(tags, key) {
+    const found = (tags || []).find((t) => Array.isArray(t) && t[0] === key && t[1]);
+    return found ? String(found[1]) : '';
+  }
+
+  function allTagValues(tags, key) {
+    return (tags || [])
+      .filter((t) => Array.isArray(t) && t[0] === key && t[1])
+      .map((t) => String(t[1]));
+  }
+
+  function formatChatTimestamp(ts) {
+    const val = Number(ts || 0);
+    if (!val) return '--:--';
+    try {
+      return new Date(val * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch (_) {
+      return '--:--';
+    }
+  }
+
+  function chatReactionKey(messageId, pubkey) {
+    return `${messageId}:${pubkey}`;
+  }
+
+  function applyChatLikeReaction(messageId, pubkey, reactionEventId) {
+    if (!messageId || !pubkey) return;
+    if (!state.chatLikePubkeysByMessageId.has(messageId)) {
+      state.chatLikePubkeysByMessageId.set(messageId, new Set());
+    }
+    state.chatLikePubkeysByMessageId.get(messageId).add(pubkey);
+
+    const key = chatReactionKey(messageId, pubkey);
+    const prevReactionId = state.chatReactionIdByMessageAndPubkey && state.chatReactionIdByMessageAndPubkey.get(key);
+    if (prevReactionId && prevReactionId !== reactionEventId) {
+      state.chatReactionEventById.delete(prevReactionId);
+    }
+    if (!state.chatReactionIdByMessageAndPubkey) state.chatReactionIdByMessageAndPubkey = new Map();
+    if (reactionEventId) {
+      state.chatReactionIdByMessageAndPubkey.set(key, reactionEventId);
+      state.chatReactionEventById.set(reactionEventId, { messageId, pubkey });
+    }
+
+    if (state.user && normalizePubkeyHex(state.user.pubkey) === normalizePubkeyHex(pubkey)) {
+      if (reactionEventId) state.chatOwnLikeEventByMessageId.set(messageId, reactionEventId);
+      else {
+        const ownKnown = state.chatReactionIdByMessageAndPubkey.get(key);
+        if (ownKnown) state.chatOwnLikeEventByMessageId.set(messageId, ownKnown);
+      }
+    }
+  }
+
+  function applyChatUnlikeByReactionId(reactionEventId) {
+    if (!reactionEventId) return;
+    const meta = state.chatReactionEventById.get(reactionEventId);
+    if (!meta) return;
+    state.chatReactionEventById.delete(reactionEventId);
+    if (!state.chatReactionIdByMessageAndPubkey) state.chatReactionIdByMessageAndPubkey = new Map();
+    const key = chatReactionKey(meta.messageId, meta.pubkey);
+    if (state.chatReactionIdByMessageAndPubkey.get(key) === reactionEventId) {
+      state.chatReactionIdByMessageAndPubkey.delete(key);
+    }
+
+    const set = state.chatLikePubkeysByMessageId.get(meta.messageId);
+    if (set) {
+      set.delete(meta.pubkey);
+      if (!set.size) state.chatLikePubkeysByMessageId.delete(meta.messageId);
+    }
+
+    if (state.user && normalizePubkeyHex(state.user.pubkey) === normalizePubkeyHex(meta.pubkey)) {
+      const ownReactionId = state.chatOwnLikeEventByMessageId.get(meta.messageId);
+      if (ownReactionId === reactionEventId) state.chatOwnLikeEventByMessageId.delete(meta.messageId);
+    }
+  }
+
+  function updateChatLikeUi(messageId) {
+    if (!messageId) return;
+    const rows = qsa(`.cmsg[data-msg-id="${CSS.escape(messageId)}"]`);
+    if (!rows.length) return;
+
+    const likedBy = state.chatLikePubkeysByMessageId.get(messageId) || new Set();
+    const count = likedBy.size;
+    const userPubkey = state.user ? normalizePubkeyHex(state.user.pubkey) : '';
+    const isLiked = !!(userPubkey && likedBy.has(userPubkey));
+
+    rows.forEach((row) => {
+      const btn = qs('.chat-like-btn', row);
+      const countEl = qs('.chat-like-count', row);
+      if (countEl) countEl.textContent = `${count}`;
+      if (btn) {
+        btn.classList.toggle('active', isLiked);
+        btn.title = isLiked ? 'Unlike' : 'Like';
+      }
+    });
+  }
+
+  function normalizeReactionContentKey(content) {
+    const raw = String(content == null ? '' : content).trim();
+    if (!raw) return '+';
+    const low = raw.toLowerCase();
+    if (low === '+' || low === 'like' || raw === 'â¤' || raw === 'â¤ï¸') return '+';
+    if (low === '-') return '-';
+    return raw;
+  }
+
+  function parseReactionMeta(content, tags) {
+    const key = normalizeReactionContentKey(content);
+    if (!key || key === '-') return null;
+    if (key === '+') return { key: '+', label: 'â¤', imageUrl: '', shortcode: '' };
+
+    let imageUrl = '';
+    let shortcode = '';
+    const match = key.match(/^:([a-z0-9_+\-]{1,64}):$/i);
+    if (match) {
+      shortcode = match[1];
+      const emojiTag = (tags || []).find((t) =>
+        Array.isArray(t) &&
+        String(t[0] || '').toLowerCase() === 'emoji' &&
+        String(t[1] || '').toLowerCase() === shortcode.toLowerCase() &&
+        isLikelyUrl(String(t[2] || ''))
+      );
+      if (emojiTag) imageUrl = String(emojiTag[2] || '').trim();
+    }
+
+    return { key, label: key, imageUrl, shortcode };
+  }
+
+  function streamReactionUserKey(reactionKey, pubkey) {
+    return `${encodeURIComponent(reactionKey || '')}:${normalizePubkeyHex(pubkey || '')}`;
+  }
+
+  function ensureStreamReactionSet(reactionKey) {
+    if (!state.streamReactionPubkeysByKey.has(reactionKey)) {
+      state.streamReactionPubkeysByKey.set(reactionKey, new Set());
+    }
+    return state.streamReactionPubkeysByKey.get(reactionKey);
+  }
+
+  function streamReactionCount(reactionKey) {
+    const set = state.streamReactionPubkeysByKey.get(reactionKey);
+    return set ? set.size : 0;
+  }
+
+  function applyStreamReaction(reactionMeta, pubkey, reactionEventId) {
+    if (!reactionMeta || !reactionMeta.key || !pubkey) return;
+    const normalizedPubkey = normalizePubkeyHex(pubkey);
+    if (!normalizedPubkey) return;
+
+    const key = reactionMeta.key;
+    const set = ensureStreamReactionSet(key);
+    set.add(normalizedPubkey);
+
+    if (key !== '+' && (reactionMeta.label || reactionMeta.imageUrl)) {
+      state.streamReactionMetaByKey.set(key, {
+        label: reactionMeta.label || key,
+        imageUrl: reactionMeta.imageUrl || '',
+        shortcode: reactionMeta.shortcode || ''
+      });
+    }
+
+    const userKey = streamReactionUserKey(key, normalizedPubkey);
+    const prevReactionId = state.streamReactionIdByKeyAndPubkey.get(userKey);
+    if (prevReactionId && prevReactionId !== reactionEventId) {
+      state.streamReactionEventById.delete(prevReactionId);
+    }
+
+    if (reactionEventId) {
+      state.streamReactionIdByKeyAndPubkey.set(userKey, reactionEventId);
+      state.streamReactionEventById.set(reactionEventId, { reactionKey: key, pubkey: normalizedPubkey });
+    }
+
+    const own = state.user ? normalizePubkeyHex(state.user.pubkey) : '';
+    const currentAddress = state.selectedStreamAddress;
+    if (own && own === normalizedPubkey) {
+      if (reactionEventId) state.streamOwnReactionIdByKey.set(key, reactionEventId);
+      if (key === '+' && currentAddress) {
+        state.likedStreamAddresses.add(currentAddress);
+        if (reactionEventId) state.streamLikeEventIdByAddress.set(currentAddress, reactionEventId);
+      }
+    }
+  }
+
+  function removeOwnStreamReactionByKey(reactionKey) {
+    const own = state.user ? normalizePubkeyHex(state.user.pubkey) : '';
+    if (!own || !reactionKey) return;
+    const userKey = streamReactionUserKey(reactionKey, own);
+    const reactionId = state.streamReactionIdByKeyAndPubkey.get(userKey);
+    if (reactionId) state.streamReactionEventById.delete(reactionId);
+    state.streamReactionIdByKeyAndPubkey.delete(userKey);
+    state.streamOwnReactionIdByKey.delete(reactionKey);
+
+    const set = state.streamReactionPubkeysByKey.get(reactionKey);
+    if (set) {
+      set.delete(own);
+      if (!set.size) {
+        state.streamReactionPubkeysByKey.delete(reactionKey);
+        if (reactionKey !== '+') state.streamReactionMetaByKey.delete(reactionKey);
+      }
+    }
+
+    if (reactionKey === '+') {
+      const currentAddress = state.selectedStreamAddress;
+      if (currentAddress) {
+        state.likedStreamAddresses.delete(currentAddress);
+        state.streamLikeEventIdByAddress.delete(currentAddress);
+      }
+    }
+  }
+
+  function removeStreamReactionById(reactionEventId) {
+    if (!reactionEventId) return;
+    const meta = state.streamReactionEventById.get(reactionEventId);
+    if (!meta) return;
+
+    state.streamReactionEventById.delete(reactionEventId);
+    const userKey = streamReactionUserKey(meta.reactionKey, meta.pubkey);
+    if (state.streamReactionIdByKeyAndPubkey.get(userKey) === reactionEventId) {
+      state.streamReactionIdByKeyAndPubkey.delete(userKey);
+    }
+
+    const set = state.streamReactionPubkeysByKey.get(meta.reactionKey);
+    if (set) {
+      set.delete(meta.pubkey);
+      if (!set.size) {
+        state.streamReactionPubkeysByKey.delete(meta.reactionKey);
+        if (meta.reactionKey !== '+') state.streamReactionMetaByKey.delete(meta.reactionKey);
+      }
+    }
+
+    const own = state.user ? normalizePubkeyHex(state.user.pubkey) : '';
+    if (own && own === normalizePubkeyHex(meta.pubkey)) {
+      if (state.streamOwnReactionIdByKey.get(meta.reactionKey) === reactionEventId) {
+        state.streamOwnReactionIdByKey.delete(meta.reactionKey);
+      }
+      if (meta.reactionKey === '+') {
+        const currentAddress = state.selectedStreamAddress;
+        if (currentAddress) {
+          state.likedStreamAddresses.delete(currentAddress);
+          state.streamLikeEventIdByAddress.delete(currentAddress);
+        }
+      }
+    }
+  }
+
+  function renderStreamReactionsUi(stream) {
+    const list = qs('#streamEmojiList');
+    const likeCount = qs('#likeCount');
+    const likeBtn = qs('#likeBtn');
+    const current = stream || state.streamsByAddress.get(state.selectedStreamAddress);
+
+    if (!current) {
+      if (list) list.innerHTML = '';
+      if (likeCount) likeCount.textContent = '0';
+      if (likeBtn) likeBtn.classList.remove('liked');
+      return;
+    }
+
+    const own = state.user ? normalizePubkeyHex(state.user.pubkey) : '';
+    const likeSet = state.streamReactionPubkeysByKey.get('+') || new Set();
+    const isLiked = !!(own && likeSet.has(own));
+    const likeTotal = likeSet.size;
+    if (likeCount) likeCount.textContent = `${likeTotal}`;
+    if (likeBtn) likeBtn.classList.toggle('liked', isLiked || state.likedStreamAddresses.has(current.address));
+
+    if (own && isLiked) state.likedStreamAddresses.add(current.address);
+
+    if (!list) return;
+    list.innerHTML = '';
+    const entries = Array.from(state.streamReactionPubkeysByKey.entries())
+      .filter(([key, set]) => key !== '+' && set && set.size)
+      .map(([key, set]) => ({
+        key,
+        count: set.size,
+        active: !!(own && set.has(own)),
+        meta: state.streamReactionMetaByKey.get(key) || { label: key, imageUrl: '', shortcode: '' }
+      }))
+      .sort((a, b) => {
+        if (b.count !== a.count) return b.count - a.count;
+        return a.key.localeCompare(b.key);
+      });
+
+    entries.forEach((entry) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'stream-emoji-chip' + (entry.active ? ' active' : '');
+      chip.title = `${entry.meta.label || entry.key} (${entry.count})`;
+      chip.addEventListener('click', () => window.toggleStreamEmojiReaction(entry.key));
+
+      const countEl = document.createElement('span');
+      countEl.className = 'stream-emoji-count';
+      countEl.textContent = `${entry.count}`;
+      chip.appendChild(countEl);
+
+      if (entry.meta.imageUrl) {
+        const img = document.createElement('img');
+        img.src = entry.meta.imageUrl;
+        img.alt = entry.meta.label || entry.key;
+        img.loading = 'lazy';
+        chip.appendChild(img);
+      } else {
+        const txt = document.createElement('span');
+        txt.textContent = String(entry.meta.label || entry.key).slice(0, 18);
+        chip.appendChild(txt);
+      }
+      list.appendChild(chip);
+    });
+  }
+
+  async function findOwnStreamReactionIdByKey(stream, reactionKey) {
+    if (!state.user || !stream || !state.pool) return '';
+    const own = normalizePubkeyHex(state.user.pubkey);
+    if (!own) return '';
+    const wantedKey = normalizeReactionContentKey(reactionKey);
+    if (!wantedKey || wantedKey === '-') return '';
+
+    return new Promise((resolve) => {
+      const reactions = new Map();
+      const deletedIds = new Set();
+      let done = false;
+      let subId = null;
+      const finish = (id = '') => {
+        if (done) return;
+        done = true;
+        if (subId) {
+          try { state.pool.unsubscribe(subId); } catch (_) {}
+        }
+        resolve(id || '');
+      };
+
+      subId = state.pool.subscribe(
+        [
+          { kinds: [KIND_REACTION], authors: [own], '#e': [stream.id], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 },
+          { kinds: [KIND_REACTION], authors: [own], '#a': [stream.address], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 },
+          { kinds: [KIND_DELETION], authors: [own], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 }
+        ],
+        {
+          event: (ev) => {
+            if (ev.kind === KIND_REACTION) {
+              const reaction = parseReactionMeta(ev.content, ev.tags);
+              if (!reaction || reaction.key !== wantedKey) return;
+              const aTag = firstTagValue(ev.tags, 'a');
+              if (aTag && aTag !== stream.address) return;
+              const eTag = firstTagValue(ev.tags, 'e');
+              if (eTag && eTag !== stream.id) return;
+              reactions.set(ev.id, ev);
+              return;
+            }
+            if (ev.kind === KIND_DELETION) {
+              allTagValues(ev.tags, 'e').forEach((id) => {
+                if (/^[0-9a-f]{64}$/i.test(id)) deletedIds.add(id);
+              });
+            }
+          },
+          eose: () => {}
+        }
+      );
+
+      setTimeout(() => {
+        const active = Array.from(reactions.values())
+          .filter((ev) => !deletedIds.has(ev.id))
+          .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
+        finish(active.length ? active[0].id : '');
+      }, 4500);
+    });
+  }
+
+  async function findOwnStreamLikeReactionId(stream) {
+    return findOwnStreamReactionIdByKey(stream, '+');
+  }
+
+  async function findOwnChatLikeReactionId(messageId, stream) {
+    if (!state.user || !state.pool || !messageId || !stream) return '';
+    const own = normalizePubkeyHex(state.user.pubkey);
+    if (!own) return '';
+
+    return new Promise((resolve) => {
+      const reactions = new Map();
+      const deletedIds = new Set();
+      let done = false;
+      let subId = null;
+      const finish = (id = '') => {
+        if (done) return;
+        done = true;
+        if (subId) {
+          try { state.pool.unsubscribe(subId); } catch (_) {}
+        }
+        resolve(id || '');
+      };
+
+      subId = state.pool.subscribe(
+        [
+          { kinds: [KIND_REACTION], authors: [own], '#e': [messageId], limit: 100, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 },
+          { kinds: [KIND_DELETION], authors: [own], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 }
+        ],
+        {
+          event: (ev) => {
+            if (ev.kind === KIND_REACTION) {
+              const content = (ev.content || '').trim();
+              if (content !== '+') return;
+              const aTag = firstTagValue(ev.tags, 'a');
+              if (aTag && aTag !== stream.address) return;
+              reactions.set(ev.id, ev);
+              return;
+            }
+            if (ev.kind === KIND_DELETION) {
+              allTagValues(ev.tags, 'e').forEach((id) => {
+                if (/^[0-9a-f]{64}$/i.test(id)) deletedIds.add(id);
+              });
+            }
+          },
+          eose: () => {}
+        }
+      );
+
+      setTimeout(() => {
+        const active = Array.from(reactions.values())
+          .filter((ev) => !deletedIds.has(ev.id))
+          .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
+        finish(active.length ? active[0].id : '');
+      }, 4500);
+    });
+  }
+
+  function postReactionPendingKey(noteId, reactionKey) {
+    return `${noteId}:${encodeURIComponent(reactionKey || '')}`;
+  }
+
+  async function findOwnPostReactionId(noteId, reactionKey) {
+    if (!state.user || !state.pool || !noteId) return '';
+    const own = normalizePubkeyHex(state.user.pubkey);
+    if (!own) return '';
+    const wantedKey = normalizeReactionContentKey(reactionKey);
+    if (!wantedKey || wantedKey === '-') return '';
+
+    return new Promise((resolve) => {
+      const reactions = new Map();
+      const deletedIds = new Set();
+      let done = false;
+      let subId = null;
+      const finish = (id = '') => {
+        if (done) return;
+        done = true;
+        if (subId) {
+          try { state.pool.unsubscribe(subId); } catch (_) {}
+        }
+        resolve(id || '');
+      };
+
+      subId = state.pool.subscribe(
+        [
+          { kinds: [KIND_REACTION], authors: [own], '#e': [noteId], limit: 100, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 90 },
+          { kinds: [KIND_DELETION], authors: [own], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 90 }
+        ],
+        {
+          event: (ev) => {
+            if (ev.kind === KIND_REACTION) {
+              const reaction = parseReactionMeta(ev.content, ev.tags);
+              if (!reaction || reaction.key !== wantedKey) return;
+              const eTag = firstTagValue(ev.tags, 'e');
+              if (eTag && eTag !== noteId) return;
+              reactions.set(ev.id, ev);
+              return;
+            }
+            if (ev.kind === KIND_DELETION) {
+              allTagValues(ev.tags, 'e').forEach((id) => {
+                if (/^[0-9a-f]{64}$/i.test(id)) deletedIds.add(id);
+              });
+            }
+          },
+          eose: () => {}
+        }
+      );
+
+      setTimeout(() => {
+        const active = Array.from(reactions.values())
+          .filter((ev) => !deletedIds.has(ev.id))
+          .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
+        finish(active.length ? active[0].id : '');
+      }, 4500);
+    });
+  }
+
+  function reactionMetaFromPicker(codeInput, urlInput = '') {
+    const code = String(codeInput || '').trim();
+    if (!code) return null;
+    const url = String(urlInput || '').trim();
+    const tagList = [];
+    const shortMatch = code.match(/^:([a-z0-9_+\-]{1,64}):$/i);
+    if (shortMatch && isLikelyUrl(url)) {
+      tagList.push(['emoji', shortMatch[1], url]);
+    }
+    const meta = parseReactionMeta(code, tagList);
+    if (!meta) return null;
+    if (shortMatch && isLikelyUrl(url)) {
+      meta.shortcode = shortMatch[1];
+      meta.imageUrl = url;
+    }
+    return meta;
+  }
+
+  function defaultReactionPickerOptions() {
+    const out = [];
+    const seen = new Set();
+    ['â¤', 'ðŸ”¥', 'ðŸ‘', 'âš¡', 'ðŸ˜‚', 'ðŸ˜®', 'ðŸš€', 'ðŸ¤™'].forEach((val) => {
+      const meta = reactionMetaFromPicker(val, '');
+      if (!meta || seen.has(meta.key)) return;
+      seen.add(meta.key);
+      out.push(meta);
+    });
+    state.streamReactionMetaByKey.forEach((meta, key) => {
+      if (!key || key === '+' || seen.has(key)) return;
+      seen.add(key);
+      out.push({
+        key,
+        label: meta && meta.label ? meta.label : key,
+        imageUrl: meta && meta.imageUrl ? meta.imageUrl : '',
+        shortcode: meta && meta.shortcode ? meta.shortcode : ''
+      });
+    });
+    return out.slice(0, 30);
+  }
+
+  async function toggleStreamReactionByMeta(reactionMeta) {
+    const stream = state.streamsByAddress.get(state.selectedStreamAddress);
+    if (!stream || !reactionMeta || !reactionMeta.key) return;
+    if (!state.user) { window.openLogin(); return; }
+    const own = normalizePubkeyHex(state.user.pubkey);
+    if (!own) return;
+
+    const reactionKey = reactionMeta.key;
+    if (state.streamReactionPublishPendingByKey.has(reactionKey)) return;
+    state.streamReactionPublishPendingByKey.add(reactionKey);
+
+    const userKey = streamReactionUserKey(reactionKey, own);
+    const activeSet = state.streamReactionPubkeysByKey.get(reactionKey) || new Set();
+    const wasActive = activeSet.has(own);
+    let knownReactionId = state.streamReactionIdByKeyAndPubkey.get(userKey) || state.streamOwnReactionIdByKey.get(reactionKey) || '';
+
+    try {
+      if (wasActive) {
+        if (!knownReactionId) {
+          knownReactionId = await findOwnStreamReactionIdByKey(stream, reactionKey);
+        }
+
+        removeOwnStreamReactionByKey(reactionKey);
+        renderStreamReactionsUi(stream);
+
+        if (knownReactionId) {
+          await signAndPublish(KIND_DELETION, 'removed stream reaction', [['e', knownReactionId], ['k', String(KIND_REACTION)], ['a', stream.address]]);
+          removeStreamReactionById(knownReactionId);
+        } else if (reactionKey === '+') {
+          await signAndPublish(KIND_REACTION, '-', [['e', stream.id], ['p', stream.pubkey], ['a', stream.address]]);
+        } else {
+          throw new Error('Could not find your existing reaction to remove yet. Try again.');
+        }
+      } else {
+        const tags = [['e', stream.id], ['p', stream.pubkey], ['a', stream.address]];
+        if (reactionMeta.shortcode && reactionMeta.imageUrl) {
+          tags.push(['emoji', reactionMeta.shortcode, reactionMeta.imageUrl]);
+        }
+        const signed = await signAndPublish(KIND_REACTION, reactionKey, tags);
+        applyStreamReaction(reactionMeta, own, signed && signed.id ? signed.id : '');
+      }
+      renderStreamReactionsUi(stream);
+    } catch (err) {
+      if (wasActive) {
+        applyStreamReaction(reactionMeta, own, knownReactionId || '');
+      } else {
+        removeOwnStreamReactionByKey(reactionKey);
+      }
+      renderStreamReactionsUi(stream);
+      alert(err && err.message ? err.message : 'Failed to update reaction.');
+    } finally {
+      state.streamReactionPublishPendingByKey.delete(reactionKey);
+    }
+  }
+
+  async function togglePostReactionByMeta(noteId, notePubkey, profilePubkey, reactionMeta) {
+    if (!noteId || !reactionMeta || !reactionMeta.key) return;
+    if (!state.user) { window.openLogin(); return; }
+    const pendingKey = postReactionPendingKey(noteId, reactionMeta.key);
+    if (state.postReactionPublishPendingByNoteAndKey.has(pendingKey)) return;
+    state.postReactionPublishPendingByNoteAndKey.add(pendingKey);
+
+    try {
+      const existingReactionId = await findOwnPostReactionId(noteId, reactionMeta.key);
+      const map = state.profileNotesByPubkey.get(profilePubkey) || new Map();
+
+      if (existingReactionId) {
+        const delTags = [['e', existingReactionId], ['k', String(KIND_REACTION)], ['p', notePubkey]];
+        const deletion = await signAndPublish(KIND_DELETION, 'removed post reaction', delTags);
+        if (deletion && deletion.id) map.set(deletion.id, deletion);
+      } else {
+        const tags = [['e', noteId], ['p', notePubkey]];
+        if (reactionMeta.shortcode && reactionMeta.imageUrl) {
+          tags.push(['emoji', reactionMeta.shortcode, reactionMeta.imageUrl]);
+        }
+        const signed = await signAndPublish(KIND_REACTION, reactionMeta.key, tags);
+        if (signed && signed.id) map.set(signed.id, signed);
+      }
+
+      state.profileNotesByPubkey.set(profilePubkey, map);
+      renderProfileFeed(profilePubkey);
+    } catch (err) {
+      alert(err && err.message ? err.message : 'Failed to update post reaction.');
+    } finally {
+      state.postReactionPublishPendingByNoteAndKey.delete(pendingKey);
+    }
+  }
+
   function renderChatMessage(ev) {
     const sc = qs('#chatScroll');
     if (!sc) return;
+    state.chatMessageEventsById.set(ev.id, ev);
     const p = profileFor(ev.pubkey);
     const row = document.createElement('div');
     row.className = 'cmsg';
     row.dataset.pubkey = ev.pubkey;
-    row.innerHTML = `<div class="c-av"></div><div class="c-body"><div class="c-name-row"><span class="c-name"></span></div><div class="c-text"></div></div>`;
+    row.dataset.msgId = ev.id;
+    row.innerHTML = `<div class="c-av"></div><div class="c-body"><div class="c-name-row"><span class="c-name"></span><span class="c-time"></span></div><div class="c-text"></div></div><div class="chat-msg-actions"><button class="cma-btn like-cma chat-like-btn" title="Like">â¤ <span class="chat-like-count">0</span></button></div>`;
     const avEl = qs('.c-av', row);
     setAvatarEl(avEl, p.picture || '', pickAvatar(ev.pubkey));
     if (p.nip05) avEl.classList.add('nip05-square');
@@ -2494,9 +3265,20 @@
     const nameEl = qs('.c-name', row);
     nameEl.textContent = state.profilesByPubkey.has(ev.pubkey) ? p.name : shortHex(ev.pubkey);
     nameEl.onclick = () => showProfileByPubkey(ev.pubkey);
+    const timeEl = qs('.c-time', row);
+    if (timeEl) {
+      timeEl.textContent = formatChatTimestamp(ev.created_at);
+      try { timeEl.title = new Date(Number(ev.created_at || 0) * 1000).toLocaleString(); } catch (_) {}
+    }
     const ctext = qs('.c-text', row);
     ctext.appendChild(renderNostrContent(ev.content || ''));
+    const likeBtn = qs('.chat-like-btn', row);
+    if (likeBtn) likeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.toggleChatLikeMessage(ev.id);
+    });
     sc.appendChild(row);
+    updateChatLikeUi(ev.id);
     sc.scrollTop = sc.scrollHeight;
     while (sc.children.length > 120) sc.removeChild(sc.firstChild);
   }
@@ -2511,6 +3293,7 @@
   function setUserUi() {
     if (!state.user) {
       setLoggedInUi(false);
+      renderFollowingCount();
       return;
     }
     setLoggedInUi(true);
@@ -2630,9 +3413,23 @@
   function subscribeChat(stream) {
     if (!stream) return;
     if (state.chatSubId) state.pool.unsubscribe(state.chatSubId);
+    if (state.chatReactionSubId) { try { state.pool.unsubscribe(state.chatReactionSubId); } catch (_) {} state.chatReactionSubId = null; }
     if (state._chatProfileSubId) { try { state.pool.unsubscribe(state._chatProfileSubId); } catch (_) {} state._chatProfileSubId = null; }
     const sc = qs('#chatScroll');
     if (sc) sc.innerHTML = '';
+    state.chatLikePubkeysByMessageId = new Map();
+    state.chatReactionIdByMessageAndPubkey = new Map();
+    state.chatReactionEventById = new Map();
+    state.chatOwnLikeEventByMessageId = new Map();
+    state.chatMessageEventsById = new Map();
+    state.chatLikePublishPendingByMessageId = new Set();
+    state.streamReactionPubkeysByKey = new Map();
+    state.streamReactionMetaByKey = new Map();
+    state.streamReactionIdByKeyAndPubkey = new Map();
+    state.streamReactionEventById = new Map();
+    state.streamOwnReactionIdByKey = new Map();
+    state.streamReactionPublishPendingByKey = new Set();
+    renderStreamReactionsUi(stream);
 
     const seenIds = new Set();
     const unknownPubkeys = new Set(); // pubkeys seen in chat but not yet in profile cache
@@ -2688,6 +3485,48 @@
         fetchMissingChatProfiles();
       }
     });
+
+    state.chatReactionSubId = state.pool.subscribe(
+      [{ kinds: [KIND_REACTION, KIND_DELETION], '#a': [stream.address], limit: 1200, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 }],
+      {
+        event: (ev) => {
+          if (!ev || !ev.id) return;
+
+          if (ev.kind === KIND_REACTION) {
+            const targetId = firstTagValue(ev.tags, 'e');
+            if (!/^[0-9a-f]{64}$/i.test(targetId || '')) return;
+            if (targetId === stream.id) {
+              const reactionMeta = parseReactionMeta(ev.content, ev.tags);
+              if (!reactionMeta) return;
+              applyStreamReaction(reactionMeta, normalizePubkeyHex(ev.pubkey), ev.id);
+              renderStreamReactionsUi(stream);
+              return;
+            }
+            const kTag = firstTagValue(ev.tags, 'k');
+            if (kTag && kTag !== String(KIND_LIVE_CHAT)) return;
+            const reactionContent = (ev.content || '').trim();
+            if (!reactionContent || reactionContent === '-') return;
+            applyChatLikeReaction(targetId, normalizePubkeyHex(ev.pubkey), ev.id);
+            updateChatLikeUi(targetId);
+            return;
+          }
+
+          if (ev.kind === KIND_DELETION) {
+            const deletedIds = allTagValues(ev.tags, 'e').filter((id) => /^[0-9a-f]{64}$/i.test(id));
+            deletedIds.forEach((rid) => {
+              const streamReactionMeta = state.streamReactionEventById.get(rid);
+              if (streamReactionMeta) {
+                removeStreamReactionById(rid);
+                renderStreamReactionsUi(stream);
+              }
+              const meta = state.chatReactionEventById.get(rid);
+              applyChatUnlikeByReactionId(rid);
+              if (meta && meta.messageId) updateChatLikeUi(meta.messageId);
+            });
+          }
+        }
+      }
+    );
   }
 
   function openStream(address, opts = {}) {
@@ -2851,14 +3690,27 @@
     const postIdSet = new Set(posts.map((p) => p.id));
     const statsByPost = new Map();
     const commentsByPost = new Map();
+    const likePubkeysByPost = new Map();
+    const emojiByPost = new Map();
 
     posts.forEach((post) => {
       statsByPost.set(post.id, { likes: 0, emoji: 0, boosts: 0, zaps: 0 });
       commentsByPost.set(post.id, []);
+      likePubkeysByPost.set(post.id, new Set());
+      emojiByPost.set(post.id, new Map());
+    });
+
+    const deletedIds = new Set();
+    map.forEach((ev) => {
+      if (!ev || ev.kind !== KIND_DELETION) return;
+      allTagValues(ev.tags, 'e').forEach((id) => {
+        if (/^[0-9a-f]{64}$/i.test(id)) deletedIds.add(id);
+      });
     });
 
     map.forEach((ev) => {
       if (!ev || !ev.id) return;
+      if (deletedIds.has(ev.id)) return;
       const ref = pickReferencedPostId(ev, postIdSet);
       if (!ref) return;
 
@@ -2871,9 +3723,25 @@
       }
 
       if (ev.kind === KIND_REACTION) {
-        const bucket = classifyReactionContent(ev.content);
-        if (bucket === 'like') stats.likes += 1;
-        else stats.emoji += 1;
+        const reaction = parseReactionMeta(ev.content, ev.tags);
+        if (!reaction) return;
+        if (reaction.key === '+') {
+          likePubkeysByPost.get(ref).add(ev.pubkey);
+        } else {
+          const perPost = emojiByPost.get(ref);
+          if (!perPost.has(reaction.key)) {
+            perPost.set(reaction.key, {
+              key: reaction.key,
+              label: reaction.label || reaction.key,
+              imageUrl: reaction.imageUrl || '',
+              shortcode: reaction.shortcode || '',
+              pubkeys: new Set()
+            });
+          }
+          const row = perPost.get(reaction.key);
+          row.pubkeys.add(ev.pubkey);
+          if (!row.imageUrl && reaction.imageUrl) row.imageUrl = reaction.imageUrl;
+        }
         return;
       }
 
@@ -2892,7 +3760,18 @@
       list.sort((a, b) => (a.created_at || 0) - (b.created_at || 0));
     });
 
-    return { statsByPost, commentsByPost };
+    posts.forEach((post) => {
+      const stats = statsByPost.get(post.id);
+      if (!stats) return;
+      const likeSet = likePubkeysByPost.get(post.id) || new Set();
+      stats.likes = likeSet.size;
+      const emojiMap = emojiByPost.get(post.id) || new Map();
+      let emojiTotal = 0;
+      emojiMap.forEach((entry) => { emojiTotal += entry.pubkeys.size; });
+      stats.emoji = emojiTotal;
+    });
+
+    return { statsByPost, commentsByPost, likePubkeysByPost, emojiByPost };
   }
 
   function stripMediaUrlsFromText(text, mediaUrls) {
@@ -2917,7 +3796,7 @@
     // Single photo: span full width; multiple: 3-col square grid (CSS handles it)
     if (photos.length === 1 && videos.length === 0) container.classList.add('one');
 
-    // Photos — square aspect-ratio 1:1 via CSS .profile-feed-photo
+    // Photos â€” square aspect-ratio 1:1 via CSS .profile-feed-photo
     photos.slice(0, 6).forEach((m) => {
       const link = document.createElement('a');
       link.className = 'profile-feed-photo';
@@ -2928,11 +3807,15 @@
       img.src = m.url;
       img.alt = 'Post image';
       img.loading = 'lazy';
+      img.addEventListener('error', () => {
+        link.classList.add('broken');
+        link.innerHTML = '<span>Open image</span>';
+      });
       link.appendChild(img);
       container.appendChild(link);
     });
 
-    // Videos — 16:9 YouTube-style, spans full grid row via CSS grid-column:1/-1
+    // Videos â€” 16:9 YouTube-style, spans full grid row via CSS grid-column:1/-1
     videos.slice(0, 2).forEach((m) => {
       const frame = document.createElement('div');
       frame.className = 'profile-feed-video';
@@ -2957,7 +3840,7 @@
                     const a = document.createElement('a');
                     a.href = m.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
                     a.style.cssText = 'display:flex;align-items:center;justify-content:center;width:100%;min-height:80px;color:var(--zap);font-size:.74rem;font-weight:600;text-decoration:none;padding:.75rem;';
-                    a.textContent = '▶ Open HLS stream';
+                    a.textContent = 'â–¶ Open HLS stream';
                     if (v.parentNode) v.parentNode.replaceChild(a, v);
                   }
                 });
@@ -2974,7 +3857,7 @@
           const fallback = document.createElement('a');
           fallback.href = m.url; fallback.target = '_blank'; fallback.rel = 'noopener noreferrer';
           fallback.style.cssText = 'display:flex;align-items:center;justify-content:center;width:100%;min-height:80px;color:var(--zap);font-size:.74rem;font-weight:600;text-decoration:none;padding:.75rem;';
-          fallback.textContent = '▶ Open Video';
+          fallback.textContent = 'â–¶ Open Video';
           if (v.parentNode) v.parentNode.replaceChild(fallback, v);
         });
         frame.appendChild(v);
@@ -3017,7 +3900,7 @@
 
       const originalProfile = (isRepost && originalPubkey) ? profileFor(originalPubkey) : null;
       const boostBanner = isRepost
-        ? `<div class="pf-boost-banner"><span class="pf-boost-icon">🔁</span><span class="pf-boost-label">${profile.display_name || profile.name || 'User'} boosted</span></div>`
+        ? `<div class="pf-boost-banner"><span class="pf-boost-icon">ðŸ”</span><span class="pf-boost-label">${profile.display_name || profile.name || 'User'} boosted</span></div>`
         : '';
 
       item.innerHTML = `${boostBanner}
@@ -3031,12 +3914,13 @@
         <div class="profile-feed-text"></div>
         <div class="profile-feed-media-wrap"></div>
         <div class="profile-feed-stats">
-          <span class="pfs"><strong>0</strong> Likes</span>
-          <span class="pfs"><strong>0</strong> Emoji</span>
-          <span class="pfs"><strong>0</strong> Boosts</span>
-          <span class="pfs"><strong>0</strong> Zaps</span>
-          <span class="pfs"><strong>0</strong> Comments</span>
+          <span class="pfs pfs-comments"><strong>0</strong> Comments</span>
+          <button class="pfs pfs-btn profile-post-like-btn" type="button"><strong>0</strong> Likes</button>
+          <span class="pfs pfs-zaps"><strong>0</strong> Zaps</span>
+          <span class="pfs pfs-boosts"><strong>0</strong> Boosts</span>
+          <button class="pfs pfs-btn pfs-plus profile-post-emoji-btn" type="button" title="React with custom emoji">+</button>
         </div>
+        <div class="profile-feed-emoji-bar"></div>
         <div class="profile-feed-comments"></div>
         <div class="profile-comment-form">
           <textarea class="profile-comment-input" rows="1" placeholder="Write a comment..."></textarea>
@@ -3098,12 +3982,72 @@
 
       const stats = (aggregates && aggregates.statsByPost.get(note.id)) || { likes: 0, emoji: 0, boosts: 0, zaps: 0 };
       const comments = (aggregates && aggregates.commentsByPost.get(note.id)) || [];
-      const statVals = qsa('.pfs strong', item);
-      if (statVals[0]) statVals[0].textContent = `${stats.likes}`;
-      if (statVals[1]) statVals[1].textContent = `${stats.emoji}`;
-      if (statVals[2]) statVals[2].textContent = `${stats.boosts}`;
-      if (statVals[3]) statVals[3].textContent = `${stats.zaps}`;
-      if (statVals[4]) statVals[4].textContent = `${comments.length}`;
+      const likeSet = (aggregates && aggregates.likePubkeysByPost && aggregates.likePubkeysByPost.get(note.id)) || new Set();
+      const emojiMap = (aggregates && aggregates.emojiByPost && aggregates.emojiByPost.get(note.id)) || new Map();
+      const commentsCount = qs('.pfs-comments strong', item);
+      const likesCount = qs('.profile-post-like-btn strong', item);
+      const zapsCount = qs('.pfs-zaps strong', item);
+      const boostsCount = qs('.pfs-boosts strong', item);
+      if (commentsCount) commentsCount.textContent = `${comments.length}`;
+      if (likesCount) likesCount.textContent = `${stats.likes}`;
+      if (zapsCount) zapsCount.textContent = `${stats.zaps}`;
+      if (boostsCount) boostsCount.textContent = `${stats.boosts}`;
+
+      const own = state.user ? normalizePubkeyHex(state.user.pubkey) : '';
+      const likeBtn = qs('.profile-post-like-btn', item);
+      if (likeBtn) {
+        likeBtn.classList.toggle('active', !!(own && likeSet.has(own)));
+        likeBtn.addEventListener('click', () => window.toggleProfilePostLike(note.id, note.pubkey, pubkey));
+      }
+
+      const emojiPlusBtn = qs('.profile-post-emoji-btn', item);
+      if (emojiPlusBtn) {
+        emojiPlusBtn.addEventListener('click', () => window.openReactionPickerForPost(note.id, note.pubkey, pubkey));
+      }
+
+      const emojiBar = qs('.profile-feed-emoji-bar', item);
+      if (emojiBar) {
+        emojiBar.innerHTML = '';
+        const entries = Array.from(emojiMap.values())
+          .filter((entry) => entry && entry.pubkeys && entry.pubkeys.size)
+          .sort((a, b) => {
+            if (b.pubkeys.size !== a.pubkeys.size) return b.pubkeys.size - a.pubkeys.size;
+            return String(a.key || '').localeCompare(String(b.key || ''));
+          });
+
+        if (!entries.length) {
+          emojiBar.style.display = 'none';
+        } else {
+          emojiBar.style.display = 'flex';
+          entries.forEach((entry) => {
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'stream-emoji-chip' + (own && entry.pubkeys.has(own) ? ' active' : '');
+            chip.title = `${entry.label || entry.key} (${entry.pubkeys.size})`;
+            chip.addEventListener('click', () => {
+              window.toggleProfilePostEmoji(note.id, note.pubkey, pubkey, entry.key, entry.imageUrl || '', entry.shortcode || '');
+            });
+
+            const countEl = document.createElement('span');
+            countEl.className = 'stream-emoji-count';
+            countEl.textContent = `${entry.pubkeys.size}`;
+            chip.appendChild(countEl);
+
+            if (entry.imageUrl) {
+              const img = document.createElement('img');
+              img.src = entry.imageUrl;
+              img.alt = entry.label || entry.key;
+              img.loading = 'lazy';
+              chip.appendChild(img);
+            } else {
+              const txt = document.createElement('span');
+              txt.textContent = String(entry.label || entry.key).slice(0, 18);
+              chip.appendChild(txt);
+            }
+            emojiBar.appendChild(chip);
+          });
+        }
+      }
 
       const commentsWrap = qs('.profile-feed-comments', item);
       const maxPreview = 3;
@@ -3208,11 +4152,11 @@
       listEl.appendChild(item);
     });
 
-    // Infinite scroll sentinel — appear if more posts exist beyond current limit
+    // Infinite scroll sentinel â€” appear if more posts exist beyond current limit
     if (notes.length > limit) {
       const sentinel = document.createElement('div');
       sentinel.className = 'feed-sentinel';
-      sentinel.innerHTML = '<span class="feed-sentinel-label">Loading more posts…</span>';
+      sentinel.innerHTML = '<span class="feed-sentinel-label">Loading more postsâ€¦</span>';
       listEl.appendChild(sentinel);
 
       const obs = new IntersectionObserver((entries) => {
@@ -3260,7 +4204,11 @@
 
   function extractHttpUrls(text) {
     const raw = (text || '').match(/https?:\/\/\S+/gi) || [];
-    return raw.map((url) => url.replace(/[),.;!?]+$/g, ''));
+    return raw.map((url) =>
+      String(url || '')
+        .replace(/[)\],.;!?'"`>]+$/g, '')
+        .replace(/^[("'`<]+/g, '')
+    );
   }
 
   function classifyMediaUrl(url) {
@@ -3408,7 +4356,7 @@
         video.addEventListener('error', () => {
           const fb = document.createElement('div');
           fb.className = 'profile-video-fallback';
-          fb.innerHTML = `<a href="${item.url}" target="_blank" rel="noopener noreferrer" style="color:var(--zap)">▶ Open Video</a>`;
+          fb.innerHTML = `<a href="${item.url}" target="_blank" rel="noopener noreferrer" style="color:var(--zap)">â–¶ Open Video</a>`;
           frame.replaceChild(fb, video);
         });
         frame.appendChild(video);
@@ -3435,7 +4383,7 @@
       const sentinel = document.createElement('div');
       sentinel.className = 'feed-sentinel media-sentinel';
       sentinel.style.gridColumn = '1/-1';
-      sentinel.innerHTML = '<span class="feed-sentinel-label">Loading more videos…</span>';
+      sentinel.innerHTML = '<span class="feed-sentinel-label">Loading more videosâ€¦</span>';
       wrap.appendChild(sentinel);
 
       const obs = new IntersectionObserver((entries) => {
@@ -3486,7 +4434,7 @@
       const sentinel = document.createElement('div');
       sentinel.className = 'feed-sentinel media-sentinel';
       sentinel.style.gridColumn = '1/-1';
-      sentinel.innerHTML = '<span class="feed-sentinel-label">Loading more photos…</span>';
+      sentinel.innerHTML = '<span class="feed-sentinel-label">Loading more photosâ€¦</span>';
       wrap.appendChild(sentinel);
 
       const obs = new IntersectionObserver((entries) => {
@@ -3618,20 +4566,20 @@
     bioGrid.classList.add('has-badges');
     grid.innerHTML = '';
 
-    const MAX_SHOWN = 9; // 3×3 grid
+    const MAX_SHOWN = 9; // 3Ã—3 grid
 
     function makeBadgeChip(award, definition) {
       const chip = document.createElement('div');
       chip.className = 'profile-badge-chip';
       const image = getBadgeDefTag(definition, 'image') || getBadgeDefTag(definition, 'thumb');
-      const name = getBadgeDefTag(definition, 'name') || getBadgeDefTag(definition, 'd') || '🏅';
+      const name = getBadgeDefTag(definition, 'name') || getBadgeDefTag(definition, 'd') || 'ðŸ…';
       const desc = getBadgeDefTag(definition, 'description');
       if (image && isLikelyUrl(image)) {
         const img = document.createElement('img');
         img.src = image; img.alt = name; img.loading = 'lazy';
-        img.onerror = () => { chip.textContent = '🏅'; };
+        img.onerror = () => { chip.textContent = 'ðŸ…'; };
         chip.appendChild(img);
-      } else { chip.textContent = '🏅'; }
+      } else { chip.textContent = 'ðŸ…'; }
       chip.title = name;
       chip.addEventListener('click', () => { openBadgePopup({ name, desc, image, definition, award }); });
       return chip;
@@ -3729,15 +4677,33 @@
     btn.classList.remove('following-active');
 
     if (!pubkey) {
-      btn.textContent = '+ Follow';
+      btn.textContent = 'Follow';
       return;
     }
 
     if (isOwn) return;
 
     const following = isFollowingPubkey(pubkey);
-    btn.textContent = following ? 'Following' : '+ Follow';
+    btn.textContent = following ? 'Following' : 'Follow';
     btn.classList.toggle('following-active', following);
+  }
+
+  function updateOwnFollowingStat(delta) {
+    if (!state.user) return;
+    const ownPubkey = normalizePubkeyHex(state.user.pubkey);
+    if (!ownPubkey) return;
+
+    const current = state.profileStatsByPubkey.get(ownPubkey) || { followers: 0, following: 0 };
+    const nextFollowing = Math.max(0, Number(current.following || 0) + Number(delta || 0));
+    state.profileStatsByPubkey.set(ownPubkey, {
+      followers: Number(current.followers || 0),
+      following: nextFollowing
+    });
+
+    if (normalizePubkeyHex(state.selectedProfilePubkey) === ownPubkey) {
+      const followingEl = qs('#profFollowing');
+      if (followingEl) followingEl.textContent = formatCount(nextFollowing);
+    }
   }
 
   function subscribeProfileFeed(pubkey) {
@@ -3760,8 +4726,8 @@
 
     state.profileFeedSubId = state.pool.subscribe(
       [
-        { kinds: [1, 6, KIND_REACTION, 20, 21, 22, 1063, KIND_ZAP_RECEIPT], authors: [pubkey], limit: 260, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 180 },
-        { kinds: [1, 6, KIND_REACTION, KIND_ZAP_RECEIPT], '#p': [pubkey], limit: 520, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 180 }
+        { kinds: [1, 6, KIND_REACTION, KIND_DELETION, 20, 21, 22, 1063, KIND_ZAP_RECEIPT], authors: [pubkey], limit: 320, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 180 },
+        { kinds: [1, 6, KIND_REACTION, KIND_DELETION, KIND_ZAP_RECEIPT], '#p': [pubkey], limit: 620, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 180 }
       ],
       {
         event: (ev) => {
@@ -3965,30 +4931,68 @@
     subscribeBadges(pubkey);
   }
 
-  function toggleFollowSelectedProfile() {
-    const pubkey = state.selectedProfilePubkey;
+  async function toggleFollowSelectedProfile() {
+    const pubkey = normalizePubkeyHex(state.selectedProfilePubkey);
     if (!pubkey) return;
-    if (state.user && state.user.pubkey === pubkey) return;
+    if (!state.user) { window.openLogin(); return; }
+    if (normalizePubkeyHex(state.user.pubkey) === pubkey) return;
+    if (state.followPublishPending) return;
+    state.followPublishPending = true;
 
-    const next = !isFollowingPubkey(pubkey);
-    setFollowingPubkey(pubkey, next);
+    try {
+      const wasFollowing = isFollowingPubkey(pubkey);
+      const next = !wasFollowing;
+      const current = state.profileStatsByPubkey.get(pubkey) || { followers: 0, following: 0 };
+      const prevFollowers = Number(current.followers || 0);
+      const nextFollowers = Math.max(0, prevFollowers + (next ? 1 : -1));
 
-    const current = state.profileStatsByPubkey.get(pubkey) || { followers: 0, following: 0 };
-    const nextFollowers = Math.max(0, Number(current.followers || 0) + (next ? 1 : -1));
-    state.profileStatsByPubkey.set(pubkey, {
-      followers: nextFollowers,
-      following: Number(current.following || 0)
-    });
+      state.profileStatsByPubkey.set(pubkey, {
+        followers: nextFollowers,
+        following: Number(current.following || 0)
+      });
 
-    renderProfileFollowButton(pubkey);
-    const followers = qs('#profFollowers');
-    if (followers) followers.textContent = formatCount(nextFollowers);
+      setFollowingPubkey(pubkey, next);
+      state.contactListPubkeys = new Set(state.followedPubkeys);
+      updateOwnFollowingStat(next ? 1 : -1);
+      renderProfileFollowButton(pubkey);
+      updateTheaterFollowBtn(pubkey);
+      renderLiveGrid();
+      const followers = qs('#profFollowers');
+      if (followers) followers.textContent = formatCount(nextFollowers);
+
+      try {
+        await publishFollowedPubkeysToNostr();
+        state.contactListPubkeys = new Set(state.followedPubkeys);
+        renderFollowingCount();
+        renderLiveGrid();
+      } catch (err) {
+        setFollowingPubkey(pubkey, wasFollowing);
+        state.contactListPubkeys = new Set(state.followedPubkeys);
+        updateOwnFollowingStat(next ? -1 : 1);
+        state.profileStatsByPubkey.set(pubkey, {
+          followers: prevFollowers,
+          following: Number(current.following || 0)
+        });
+        renderProfileFollowButton(pubkey);
+        updateTheaterFollowBtn(pubkey);
+        renderLiveGrid();
+        if (followers) followers.textContent = formatCount(prevFollowers);
+        alert(err.message || 'Failed to update follow list.');
+      }
+    } finally {
+      state.followPublishPending = false;
+    }
   }
 
   function setAuthenticatedUser(pubkey, authMode) {
     state.authMode = authMode;
+    state.followPublishPending = false;
+    state.streamLikePublishPending = false;
+    state.streamReactionPublishPendingByKey = new Set();
+    state.postReactionPublishPendingByNoteAndKey = new Set();
     state.user = { pubkey, profile: state.profilesByPubkey.get(pubkey) || null };
     setUserUi();
+    renderStreamReactionsUi();
     window.closeLogin();
     subscribeProfiles([pubkey]);
   }
@@ -4093,9 +5097,9 @@
 
     // Reset reveal/copy buttons
     const revealBtn = qs('#onbRevealBtn');
-    if (revealBtn) revealBtn.textContent = '👁 Reveal';
+    if (revealBtn) revealBtn.textContent = 'ðŸ‘ Reveal';
     const copyBtn = qs('#onbCopyBtn');
-    if (copyBtn) { copyBtn.textContent = '📋 Copy'; copyBtn.classList.remove('copied'); }
+    if (copyBtn) { copyBtn.textContent = 'ðŸ“‹ Copy'; copyBtn.classList.remove('copied'); }
 
     // Reset checkbox + continue button
     const check = qs('#onbSavedCheck');
@@ -4155,7 +5159,7 @@
     const btn = qs('#onbRevealBtn');
     if (!el) return;
     const revealed = el.classList.toggle('revealed');
-    if (btn) btn.textContent = revealed ? '🙈 Hide' : '👁 Reveal';
+    if (btn) btn.textContent = revealed ? 'ðŸ™ˆ Hide' : 'ðŸ‘ Reveal';
   }
 
   // Called from HTML: copy nsec to clipboard
@@ -4166,15 +5170,15 @@
       await navigator.clipboard.writeText(value);
       const btn = qs('#onbCopyBtn');
       if (btn) {
-        btn.textContent = '✓ Copied!';
+        btn.textContent = 'âœ“ Copied!';
         btn.classList.add('copied');
-        setTimeout(() => { btn.textContent = '📋 Copy'; btn.classList.remove('copied'); }, 2000);
+        setTimeout(() => { btn.textContent = 'ðŸ“‹ Copy'; btn.classList.remove('copied'); }, 2000);
       }
       // Also reveal so user can verify what was copied
       const el = qs('#onbNsecValue');
       if (el) { el.classList.add('revealed'); }
       const revBtn = qs('#onbRevealBtn');
-      if (revBtn) revBtn.textContent = '🙈 Hide';
+      if (revBtn) revBtn.textContent = 'ðŸ™ˆ Hide';
     } catch (_) {
       alert('Clipboard blocked. Please manually select and copy the key.');
     }
@@ -4225,7 +5229,7 @@
 
   async function completeOnboarding() {
     const saveBtn = qs('#onbSaveBtn');
-    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Savingâ€¦'; }
 
     const profileData = {
       name: (qs('#onbDisplayName') && qs('#onbDisplayName').value.trim()) || shortHex(state.user ? state.user.pubkey : ''),
@@ -4248,7 +5252,7 @@
       applySettings(nextSettings, { reconnect: false });
       closeOnboarding();
     } catch (err) {
-      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '✓ Save & Enter Sifaka Live'; }
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'âœ“ Save & Enter Sifaka Live'; }
       alert(err.message || 'Failed to publish profile. Please try again.');
     }
   }
@@ -4404,28 +5408,52 @@
     const stream = state.streamsByAddress.get(state.selectedStreamAddress);
     if (!stream) return;
     if (!state.user) { window.openLogin(); return; }
-
-    const likeBtn = qs('#likeBtn');
-    const likeCount = qs('#likeCount');
+    if (state.streamLikePublishPending) return;
+    state.streamLikePublishPending = true;
+    const ownPubkey = normalizePubkeyHex(state.user.pubkey);
+    if (!ownPubkey) { state.streamLikePublishPending = false; return; }
     const alreadyLiked = state.likedStreamAddresses.has(stream.address);
+    const likeMeta = { key: '+', label: 'â¤', imageUrl: '', shortcode: '' };
 
-    if (alreadyLiked) {
-      state.likedStreamAddresses.delete(stream.address);
-      if (likeCount) likeCount.textContent = `${Math.max(0, (Number(likeCount.textContent) || 0) - 1)}`;
-      if (likeBtn) likeBtn.classList.remove('liked');
-      try { await signAndPublish(KIND_REACTION, '-', [['e', stream.id], ['p', stream.pubkey], ['a', stream.address]]); } catch (_) {}
-    } else {
-      state.likedStreamAddresses.add(stream.address);
-      if (likeCount) likeCount.textContent = `${(Number(likeCount.textContent) || 0) + 1}`;
-      if (likeBtn) likeBtn.classList.add('liked');
-      try {
-        await signAndPublish(KIND_REACTION, '+', [['e', stream.id], ['p', stream.pubkey], ['a', stream.address]]);
-      } catch (err) {
-        state.likedStreamAddresses.delete(stream.address);
-        if (likeCount) likeCount.textContent = `${Math.max(0, (Number(likeCount.textContent) || 0) - 1)}`;
-        if (likeBtn) likeBtn.classList.remove('liked');
-        alert(err.message || 'Failed to react.');
+    try {
+      if (alreadyLiked) {
+        removeOwnStreamReactionByKey('+');
+        renderStreamReactionsUi(stream);
+
+        let reactionId = state.streamLikeEventIdByAddress.get(stream.address) || '';
+        if (!reactionId) {
+          reactionId = await findOwnStreamLikeReactionId(stream);
+          if (reactionId) state.streamLikeEventIdByAddress.set(stream.address, reactionId);
+        }
+
+        if (reactionId) {
+          await signAndPublish(KIND_DELETION, 'unliked stream', [['e', reactionId], ['k', String(KIND_REACTION)], ['a', stream.address]]);
+          removeStreamReactionById(reactionId);
+          state.streamLikeEventIdByAddress.delete(stream.address);
+        } else {
+          // Fallback for relays that cannot return our prior reaction quickly.
+          await signAndPublish(KIND_REACTION, '-', [['e', stream.id], ['p', stream.pubkey], ['a', stream.address]]);
+        }
+      } else {
+        applyStreamReaction(likeMeta, ownPubkey, '');
+        renderStreamReactionsUi(stream);
+        const likeEv = await signAndPublish(KIND_REACTION, '+', [['e', stream.id], ['p', stream.pubkey], ['a', stream.address]]);
+        if (likeEv && likeEv.id) {
+          state.streamLikeEventIdByAddress.set(stream.address, likeEv.id);
+          applyStreamReaction(likeMeta, ownPubkey, likeEv.id);
+        }
       }
+      renderStreamReactionsUi(stream);
+    } catch (err) {
+      if (alreadyLiked) {
+        applyStreamReaction(likeMeta, ownPubkey, state.streamLikeEventIdByAddress.get(stream.address) || '');
+      } else {
+        removeOwnStreamReactionByKey('+');
+      }
+      renderStreamReactionsUi(stream);
+      alert(err.message || 'Failed to react.');
+    } finally {
+      state.streamLikePublishPending = false;
     }
   }
 
@@ -4576,7 +5604,7 @@
       if (home) home.classList.remove('active');
       if (video) video.style.display = 'block';
       if (profile) profile.style.display = 'none';
-      // Kill the hero cycle timer completely — prevents it firing and starting audio behind theater
+      // Kill the hero cycle timer completely â€” prevents it firing and starting audio behind theater
       stopHeroCycle();
       stopAllAudio('theater');
       if (window.renderRecoStreams) window.renderRecoStreams(); // populate "Also Live Now"
@@ -4594,7 +5622,7 @@
       if (home) home.classList.remove('active');
       if (video) video.style.display = 'none';
       if (profile) profile.style.display = 'block';
-      // Kill the hero cycle timer completely — prevents audio starting behind profile
+      // Kill the hero cycle timer completely â€” prevents audio starting behind profile
       stopHeroCycle();
       stopAllAudio('profile');
 
@@ -4769,7 +5797,7 @@
 
       const lists = Array.from(state.nip51Lists.values());
       if (!lists.length) {
-        itemsEl.innerHTML = '<div class="atl-empty">No lists yet — create one below.</div>';
+        itemsEl.innerHTML = '<div class="atl-empty">No lists yet â€” create one below.</div>';
         return;
       }
 
@@ -4779,7 +5807,7 @@
         btn.className = 'atl-item';
         const inList = !!(pubkey && list.pubkeys.includes(pubkey));
         if (inList) {
-          btn.textContent = '✓ ' + (list.name || 'Unnamed List');
+          btn.textContent = 'âœ“ ' + (list.name || 'Unnamed List');
           btn.classList.add('atl-saved');
           btn.title = 'Click to remove from this list';
         } else {
@@ -5078,7 +6106,7 @@
       }
     };
 
-    // Legacy save — kept for external references
+    // Legacy save â€” kept for external references
     window.saveSettings = async function () {
       try {
         const next = collectSettingsFromModal();
@@ -5145,16 +6173,222 @@
       sendReaction();
     };
 
-    window.toggleTheaterFollow = function () {
+    window.toggleStreamEmojiReaction = async function (reactionKey) {
+      const knownMeta = state.streamReactionMetaByKey.get(reactionKey) || {};
+      const reactionMeta = {
+        key: normalizeReactionContentKey(reactionKey),
+        label: knownMeta.label || reactionKey,
+        imageUrl: knownMeta.imageUrl || '',
+        shortcode: knownMeta.shortcode || ''
+      };
+      await toggleStreamReactionByMeta(reactionMeta);
+    };
+
+    window.toggleProfilePostLike = async function (noteId, notePubkey, profilePubkey) {
+      await togglePostReactionByMeta(noteId, notePubkey, profilePubkey, { key: '+', label: 'â¤', imageUrl: '', shortcode: '' });
+    };
+
+    window.toggleProfilePostEmoji = async function (noteId, notePubkey, profilePubkey, reactionKey, imageUrl = '', shortcode = '') {
+      const knownMeta = state.streamReactionMetaByKey.get(reactionKey) || {};
+      const reactionMeta = {
+        key: normalizeReactionContentKey(reactionKey),
+        label: knownMeta.label || reactionKey,
+        imageUrl: imageUrl || knownMeta.imageUrl || '',
+        shortcode: shortcode || knownMeta.shortcode || ''
+      };
+      await togglePostReactionByMeta(noteId, notePubkey, profilePubkey, reactionMeta);
+    };
+
+    const renderReactionPickerGrid = () => {
+      const grid = qs('#reactionPickerGrid');
+      if (!grid) return;
+      grid.innerHTML = '';
+      defaultReactionPickerOptions().forEach((opt) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'reaction-opt-btn';
+        btn.title = opt.label || opt.key;
+        btn.addEventListener('click', async () => {
+          const target = state.reactionPickerTarget;
+          if (!target) return;
+          if (target.type === 'stream') {
+            await toggleStreamReactionByMeta(opt);
+          } else if (target.type === 'post') {
+            await togglePostReactionByMeta(target.noteId, target.notePubkey, target.profilePubkey, opt);
+          }
+          window.closeReactionPicker();
+        });
+
+        if (opt.imageUrl) {
+          const img = document.createElement('img');
+          img.src = opt.imageUrl;
+          img.alt = opt.label || opt.key;
+          img.loading = 'lazy';
+          btn.appendChild(img);
+        } else {
+          btn.textContent = opt.label || opt.key;
+        }
+        grid.appendChild(btn);
+      });
+    };
+
+    window.openReactionPickerForStream = function () {
+      const stream = state.streamsByAddress.get(state.selectedStreamAddress);
+      if (!stream) return;
+      state.reactionPickerTarget = { type: 'stream' };
+      renderReactionPickerGrid();
+      const code = qs('#reactionPickerCode');
+      const url = qs('#reactionPickerUrl');
+      if (code) code.value = '';
+      if (url) url.value = '';
+      const ov = qs('#reactionPickerModal');
+      if (ov) ov.classList.add('open');
+      if (code) code.focus();
+    };
+
+    window.openReactionPickerForPost = function (noteId, notePubkey, profilePubkey) {
+      if (!noteId || !notePubkey || !profilePubkey) return;
+      state.reactionPickerTarget = { type: 'post', noteId, notePubkey, profilePubkey };
+      renderReactionPickerGrid();
+      const code = qs('#reactionPickerCode');
+      const url = qs('#reactionPickerUrl');
+      if (code) code.value = '';
+      if (url) url.value = '';
+      const ov = qs('#reactionPickerModal');
+      if (ov) ov.classList.add('open');
+      if (code) code.focus();
+    };
+
+    window.closeReactionPicker = function (e) {
+      const ov = qs('#reactionPickerModal');
+      if (!ov) return;
+      if (e && e.target !== ov) return;
+      ov.classList.remove('open');
+      state.reactionPickerTarget = null;
+      const code = qs('#reactionPickerCode');
+      const url = qs('#reactionPickerUrl');
+      if (code) code.value = '';
+      if (url) url.value = '';
+    };
+
+    window.submitCustomReactionPicker = async function () {
+      const target = state.reactionPickerTarget;
+      if (!target) return;
+      const code = (qs('#reactionPickerCode') && qs('#reactionPickerCode').value || '').trim();
+      const url = (qs('#reactionPickerUrl') && qs('#reactionPickerUrl').value || '').trim();
+      const reactionMeta = reactionMetaFromPicker(code, url);
+      if (!reactionMeta) {
+        alert('Enter an emoji or :shortcode: first.');
+        return;
+      }
+      if (target.type === 'stream') {
+        await toggleStreamReactionByMeta(reactionMeta);
+      } else if (target.type === 'post') {
+        await togglePostReactionByMeta(target.noteId, target.notePubkey, target.profilePubkey, reactionMeta);
+      }
+      window.closeReactionPicker();
+    };
+
+    window.toggleChatLikeMessage = async function (messageId) {
+      const messageEvent = state.chatMessageEventsById.get(messageId);
+      const stream = state.streamsByAddress.get(state.selectedStreamAddress);
+      if (!messageEvent || !stream || !/^[0-9a-f]{64}$/i.test(messageId || '')) return;
+      if (!state.user) { window.openLogin(); return; }
+      if (state.chatLikePublishPendingByMessageId.has(messageId)) return;
+
+      const userPubkey = normalizePubkeyHex(state.user.pubkey);
+      if (!userPubkey) return;
+      state.chatLikePublishPendingByMessageId.add(messageId);
+
+      const likedSet = state.chatLikePubkeysByMessageId.get(messageId) || new Set();
+      const wasLiked = likedSet.has(userPubkey);
+      const previousOwnReactionId = state.chatOwnLikeEventByMessageId.get(messageId) || '';
+
+      try {
+        if (wasLiked) {
+          if (state.chatLikePubkeysByMessageId.has(messageId)) {
+            state.chatLikePubkeysByMessageId.get(messageId).delete(userPubkey);
+            if (!state.chatLikePubkeysByMessageId.get(messageId).size) state.chatLikePubkeysByMessageId.delete(messageId);
+          }
+          state.chatOwnLikeEventByMessageId.delete(messageId);
+          updateChatLikeUi(messageId);
+
+          let reactionId = previousOwnReactionId;
+          if (!reactionId) {
+            reactionId = await findOwnChatLikeReactionId(messageId, stream);
+          }
+
+          if (reactionId) {
+            await signAndPublish(KIND_DELETION, 'unliked chat message', [['e', reactionId], ['k', String(KIND_REACTION)], ['a', stream.address]]);
+            applyChatUnlikeByReactionId(reactionId);
+          } else {
+            await signAndPublish(KIND_REACTION, '-', [['e', messageId], ['p', messageEvent.pubkey], ['a', stream.address]]);
+          }
+          updateChatLikeUi(messageId);
+        } else {
+          applyChatLikeReaction(messageId, userPubkey, '');
+          updateChatLikeUi(messageId);
+
+          const likeEv = await signAndPublish(KIND_REACTION, '+', [['e', messageId], ['p', messageEvent.pubkey], ['a', stream.address]]);
+          if (likeEv && likeEv.id) applyChatLikeReaction(messageId, userPubkey, likeEv.id);
+          updateChatLikeUi(messageId);
+        }
+      } catch (err) {
+        if (wasLiked) {
+          applyChatLikeReaction(messageId, userPubkey, previousOwnReactionId);
+        } else {
+          const set = state.chatLikePubkeysByMessageId.get(messageId);
+          if (set) {
+            set.delete(userPubkey);
+            if (!set.size) state.chatLikePubkeysByMessageId.delete(messageId);
+          }
+          state.chatOwnLikeEventByMessageId.delete(messageId);
+        }
+        updateChatLikeUi(messageId);
+        alert(err.message || 'Failed to update chat like.');
+      } finally {
+        state.chatLikePublishPendingByMessageId.delete(messageId);
+      }
+    };
+
+    window.toggleTheaterFollow = async function () {
       const stream = state.streamsByAddress.get(state.selectedStreamAddress);
       if (!stream) return;
       if (!state.user) { window.openLogin(); return; }
-      const pubkey = stream.hostPubkey;
-      const next = !isFollowingPubkey(pubkey);
-      setFollowingPubkey(pubkey, next);
-      updateTheaterFollowBtn(pubkey);
-      // Keep profile page in sync if it's open for the same person
-      if (state.selectedProfilePubkey === pubkey) renderProfileFollowButton(pubkey);
+      const pubkey = normalizePubkeyHex(stream.hostPubkey);
+      if (!pubkey) return;
+      if (state.followPublishPending) return;
+      state.followPublishPending = true;
+
+      try {
+        const wasFollowing = isFollowingPubkey(pubkey);
+        const next = !wasFollowing;
+        setFollowingPubkey(pubkey, next);
+        state.contactListPubkeys = new Set(state.followedPubkeys);
+        updateOwnFollowingStat(next ? 1 : -1);
+        updateTheaterFollowBtn(pubkey);
+        renderLiveGrid();
+
+        // Keep profile page in sync if it's open for the same person
+        if (normalizePubkeyHex(state.selectedProfilePubkey) === pubkey) renderProfileFollowButton(pubkey);
+
+        try {
+          await publishFollowedPubkeysToNostr();
+          state.contactListPubkeys = new Set(state.followedPubkeys);
+          renderFollowingCount();
+          renderLiveGrid();
+        } catch (err) {
+          setFollowingPubkey(pubkey, wasFollowing);
+          state.contactListPubkeys = new Set(state.followedPubkeys);
+          updateOwnFollowingStat(next ? -1 : 1);
+          updateTheaterFollowBtn(pubkey);
+          if (normalizePubkeyHex(state.selectedProfilePubkey) === pubkey) renderProfileFollowButton(pubkey);
+          renderLiveGrid();
+          alert(err.message || 'Failed to update follow list.');
+        }
+      } finally {
+        state.followPublishPending = false;
+      }
     };
 
     // ---- "Also Live Now" reco panel ----
@@ -5180,7 +6414,7 @@
           <div class="reco-thumb"><div class="tc ${thumbClasses[i % thumbClasses.length]}" style="height:100%;display:flex;align-items:center;justify-content:center;font-size:1.2rem;"></div></div>
           <div class="reco-text"><div class="rt"></div><div class="rs"></div></div>`;
         qs('.rt', item).textContent = s.title || 'Untitled stream';
-        qs('.rs', item).innerHTML = `${p.name || shortHex(s.hostPubkey)} — <span style="color:var(--live)">${viewerCount > 0 ? viewerCount.toLocaleString() + ' live' : 'live'}</span>`;
+        qs('.rs', item).innerHTML = `${p.name || shortHex(s.hostPubkey)} â€” <span style="color:var(--live)">${viewerCount > 0 ? viewerCount.toLocaleString() + ' live' : 'live'}</span>`;
         if (s.image) {
           const thumb = qs('.reco-thumb', item);
           thumb.innerHTML = `<img src="${s.image}" style="width:100%;height:100%;object-fit:cover;" loading="lazy">`;
@@ -5208,7 +6442,7 @@
       const text = (textarea && textarea.value || '').trim();
       if (!text) return;
 
-      if (btn) { btn.disabled = true; btn.textContent = 'Posting…'; }
+      if (btn) { btn.disabled = true; btn.textContent = 'Postingâ€¦'; }
       try {
         await signAndPublish(1, text, []);
         if (textarea) textarea.value = '';
@@ -5237,7 +6471,7 @@
           await window.webln.enable();
           const zapAmountMsats = 21000;
           const zapTags = [['relays', ...state.relays], ['amount', String(zapAmountMsats)], ['p', stream.pubkey], ['e', stream.id]];
-          const zapRequest = await signAndPublish(9734, '⚡ zapping from Sifaka Live', zapTags);
+          const zapRequest = await signAndPublish(9734, 'âš¡ zapping from Sifaka Live', zapTags);
           const [user, domain] = lud16.split('@');
           const meta = await fetch(`https://${domain}/.well-known/lnurlp/${user}`).then((r) => r.json());
           if (!meta.callback) throw new Error('Invalid LNURL response.');
@@ -5245,7 +6479,7 @@
           if (!invoiceData.pr) throw new Error('No payment request returned.');
           await window.webln.sendPayment(invoiceData.pr);
           const zapBtn = qs('#theaterZapBtn');
-          if (zapBtn) { const o = zapBtn.innerHTML; zapBtn.textContent = '⚡ Zapped!'; setTimeout(() => { zapBtn.innerHTML = o; }, 2000); }
+          if (zapBtn) { const o = zapBtn.innerHTML; zapBtn.textContent = 'âš¡ Zapped!'; setTimeout(() => { zapBtn.innerHTML = o; }, 2000); }
           return;
         } catch (err) { console.warn('WebLN zap failed:', err.message); }
       }
@@ -5253,19 +6487,103 @@
     };
 
     // ---- Share stream ----
-    window.shareStream = async function () {
-      const stream = state.streamsByAddress.get(state.selectedStreamAddress);
-      const text = (stream && stream.title) ? `Watching "${stream.title}" live on Nostr` : 'Live stream on Nostr';
-      const url = window.location.href;
+    window.closeShareModal = function (e) {
+      const ov = qs('#shareModal');
+      if (!ov) return;
+      if (e && e.target !== ov) return;
+      ov.classList.remove('open');
+      state.shareModalStreamAddress = '';
+    };
+
+    window.copyShareField = async function (fieldId) {
+      const input = qs(`#${fieldId}`);
+      const val = input ? String(input.value || '').trim() : '';
+      if (!val) return;
       try {
-        if (navigator.share) { await navigator.share({ title: text, url }); }
-        else if (navigator.clipboard) {
-          await navigator.clipboard.writeText(url);
-          const btn = qs('.action-btn.share-btn');
-          if (btn) { const o = btn.textContent; btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = o; }, 1500); }
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          await navigator.clipboard.writeText(val);
+          return;
         }
       } catch (_) {}
+      window.prompt('Copy value:', val);
     };
+
+    window.shareStreamAction = async function (mode) {
+      const stream = state.streamsByAddress.get(state.shareModalStreamAddress || state.selectedStreamAddress);
+      if (!stream) return;
+      syncTheaterRoute(stream, 'replace');
+
+      const url = (qs('#shareWebUrl') && qs('#shareWebUrl').value) || window.location.href;
+      const text = stream.title ? `Watching "${stream.title}" live on Nostr` : 'Live stream on Nostr';
+      const shareBody = `${text}\n${url}`;
+
+      try {
+        if (mode === 'boost') {
+          if (!state.user) { window.openLogin(); return; }
+          const repostTags = [['e', stream.id], ['p', stream.pubkey], ['a', stream.address]];
+          const repostContent = stream.raw && stream.raw.id ? JSON.stringify(stream.raw) : '';
+          await signAndPublish(6, repostContent, repostTags);
+          window.closeShareModal();
+          return;
+        }
+
+        if (mode === 'copy') {
+          await window.copyShareField('shareWebUrl');
+          return;
+        }
+
+        if (mode === 'app') {
+          if (navigator.share) {
+            await navigator.share({ title: text, text: shareBody, url });
+            return;
+          }
+          window.open(`sms:?&body=${encodeURIComponent(shareBody)}`, '_blank');
+        }
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        alert(err && err.message ? err.message : 'Share failed.');
+      }
+    };
+
+    window.shareStream = async function () {
+      const stream = state.streamsByAddress.get(state.selectedStreamAddress);
+      if (!stream) return;
+
+      syncTheaterRoute(stream, 'replace');
+      state.shareModalStreamAddress = stream.address;
+
+      const webUrl = window.location.href;
+      const naddrInput = qs('#shareNaddr');
+      const webInput = qs('#shareWebUrl');
+      if (webInput) webInput.value = webUrl;
+
+      const initialNaddr = encodeStreamNaddr(stream);
+      if (naddrInput) naddrInput.value = initialNaddr || '';
+      if (!initialNaddr) {
+        ensureNostrTools().then(() => {
+          const next = encodeStreamNaddr(stream);
+          if (naddrInput) naddrInput.value = next || '';
+        }).catch(() => {});
+      }
+
+      const ov = qs('#shareModal');
+      if (ov) ov.classList.add('open');
+    };
+
+    const shareOv = qs('#shareModal');
+    if (shareOv && !shareOv.dataset.boundOutsideClose) {
+      shareOv.dataset.boundOutsideClose = '1';
+      shareOv.addEventListener('click', (e) => {
+        if (e.target === shareOv) window.closeShareModal(e);
+      });
+    }
+    const reactionOv = qs('#reactionPickerModal');
+    if (reactionOv && !reactionOv.dataset.boundOutsideClose) {
+      reactionOv.dataset.boundOutsideClose = '1';
+      reactionOv.addEventListener('click', (e) => {
+        if (e.target === reactionOv) window.closeReactionPicker(e);
+      });
+    }
 
     // ---- Badge popup ----
     window.openBadgePopup = function ({ name, desc, image, definition, award }) {
@@ -5286,10 +6604,10 @@
           const img = document.createElement('img');
           img.src = image;
           img.alt = name || 'Badge';
-          img.onerror = () => { imgWrap.textContent = '🏅'; };
+          img.onerror = () => { imgWrap.textContent = 'ðŸ…'; };
           imgWrap.appendChild(img);
         } else {
-          imgWrap.textContent = '🏅';
+          imgWrap.textContent = 'ðŸ…';
         }
       }
 
@@ -5336,14 +6654,14 @@
         const chip = document.createElement('div');
         chip.className = 'profile-badge-chip';
         const image = getBadgeDefTag(definition, 'image') || getBadgeDefTag(definition, 'thumb');
-        const name = getBadgeDefTag(definition, 'name') || getBadgeDefTag(definition, 'd') || '🏅';
+        const name = getBadgeDefTag(definition, 'name') || getBadgeDefTag(definition, 'd') || 'ðŸ…';
         const desc = getBadgeDefTag(definition, 'description');
         if (image && isLikelyUrl(image)) {
           const img = document.createElement('img');
           img.src = image; img.alt = name; img.loading = 'lazy';
-          img.onerror = () => { chip.textContent = '🏅'; };
+          img.onerror = () => { chip.textContent = 'ðŸ…'; };
           chip.appendChild(img);
-        } else { chip.textContent = '🏅'; }
+        } else { chip.textContent = 'ðŸ…'; }
         chip.title = name;
         chip.addEventListener('click', () => { openBadgePopup({ name, desc, image, definition, award }); });
         grid.appendChild(chip);
@@ -5364,10 +6682,30 @@
       state.pendingOnboardingNsec = ''; state.selectedStreamAddress = null;
       state.selectedProfilePubkey = null; state.selectedProfileLiveAddress = null;
       state.followedPubkeys = new Set(); state.contactListPubkeys = new Set();
+      state.contactsLatestCreatedAt = 0; state.contactsContent = '';
+      state.contactsPTagByPubkey = new Map(); state.contactsOtherTags = [];
+      state.followPublishPending = false;
       state.nip51Lists = new Map(); state.savedExternalLists = [];
       state.likedStreamAddresses = new Set();
+      state.streamLikeEventIdByAddress = new Map();
+      state.streamLikePublishPending = false;
+      state.streamReactionPubkeysByKey = new Map();
+      state.streamReactionMetaByKey = new Map();
+      state.streamReactionIdByKeyAndPubkey = new Map();
+      state.streamReactionEventById = new Map();
+      state.streamOwnReactionIdByKey = new Map();
+      state.streamReactionPublishPendingByKey = new Set();
+      state.chatLikePubkeysByMessageId = new Map();
+      state.chatReactionIdByMessageAndPubkey = new Map();
+      state.chatReactionEventById = new Map();
+      state.chatOwnLikeEventByMessageId = new Map();
+      state.chatMessageEventsById = new Map();
+      state.chatLikePublishPendingByMessageId = new Set();
+      state.postReactionPublishPendingByNoteAndKey = new Set();
+      state.reactionPickerTarget = null;
+      state.shareModalStreamAddress = '';
       window.closeAllDD();
-      ['goLiveModal','endModal','loginModal','settingsModal','faqModal'].forEach((id) => {
+      ['goLiveModal','endModal','loginModal','settingsModal','faqModal','shareModal','reactionPickerModal'].forEach((id) => {
         const el = qs('#' + id); if (el) el.classList.remove('open');
       });
       setUserUi();
@@ -5442,57 +6780,4 @@
 
   document.addEventListener('DOMContentLoaded', init);
 })();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
