@@ -337,6 +337,22 @@ nav {
 .stream-emoji-chip img{width:14px;height:14px;object-fit:contain;display:block;}
 .stream-emoji-count{font-size:.64rem;color:var(--text);}
 .stream-like-counter{border:1px solid var(--border2);background:var(--surface2);color:var(--text2);border-radius:999px;font-family:'DM Mono',monospace;font-size:.68rem;padding:.2rem .55rem;}
+.stream-zap-list{display:flex;align-items:center;gap:.34rem;flex-wrap:wrap;min-height:30px;}
+.stream-zap-pill{
+  display:inline-flex;align-items:center;gap:.46rem;
+  padding:.3rem .58rem .3rem .36rem;
+  background:linear-gradient(135deg,rgba(247,147,26,.2),rgba(247,183,49,.08));
+  border:1px solid rgba(247,147,26,.55);
+  border-radius:20px;
+  box-shadow:0 0 10px rgba(247,147,26,.18);
+  cursor:pointer;
+  transition:border-color .16s,box-shadow .16s;
+}
+.stream-zap-pill:hover{border-color:rgba(247,147,26,.9);box-shadow:0 0 16px rgba(247,147,26,.28);}
+.stream-zap-pill .hosted-by-av{border-color:rgba(247,147,26,.72);background:rgba(247,147,26,.18);}
+.stream-zap-pill .hosted-by-av-fallback{color:var(--zap);}
+.stream-zap-pill .hosted-by-label{color:var(--zap);}
+.stream-zap-pill .hosted-by-name{color:#ffd9ad;font-family:'DM Mono',monospace;font-size:.67rem;}
 
 /* Stats row - followers now included here */
 .sib-stats-row{display:flex;gap:1rem;margin-top:.65rem;padding-top:.6rem;border-top:1px solid var(--border);align-items:center;flex-wrap:wrap;}
@@ -379,7 +395,7 @@ nav {
 .stabs{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;}
 .stab{flex:1;padding:.62rem;text-align:center;font-size:.76rem;font-weight:600;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;transition:all .15s;}
 .stab.active{color:var(--text);border-bottom-color:var(--accent);}
-.chat-scroll{flex:1;overflow-y:auto;padding:.65rem;display:flex;flex-direction:column;gap:.4rem;scrollbar-width:thin;scrollbar-color:var(--border) transparent;}
+.chat-scroll{flex:1;overflow-y:auto;padding:.65rem;display:flex;flex-direction:column;justify-content:flex-end;gap:.4rem;scrollbar-width:thin;scrollbar-color:var(--border) transparent;}
 ::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px;}
 
 .cmsg{display:flex;gap:.4rem;align-items:flex-start;position:relative;}
@@ -1371,3 +1387,5 @@ footer p{font-size:.72rem;color:var(--muted);}
   display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
   overflow:hidden;
 }
+
+

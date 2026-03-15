@@ -28,6 +28,12 @@
   const NIP05_LOOKUP_MISS_CACHE_TTL_MS = 1000 * 60 * 3;
   const NIP05_LOOKUP_ERROR_CACHE_TTL_MS = 1000 * 45;
   const NIP05_UNVERIFIED_CACHE_TTL_MS = 1000 * 60 * 2;
+  const LIVE_STREAMS_CACHE_STORAGE_KEY = 'nostrflux_live_streams_cache_v1';
+  const LIVE_STREAMS_CACHE_TTL_MS = 1000 * 60 * 2;
+  const LIVE_STREAMS_CACHE_MAX_ITEMS = 160;
+  const ONE_SHOT_CACHE_DEFAULT_TTL_MS = 1000 * 12;
+  const ONE_SHOT_CACHE_DEFAULT_WARM_MS = 1000 * 75;
+  const ONE_SHOT_CACHE_MAX_ENTRIES = 700;
 
   const DEFAULT_SETTINGS = {
     relays: [...DEFAULT_RELAYS],
@@ -103,6 +109,8 @@
     GRID_PAGE_SIZE: 20,
     scriptPromises: {},
     streamZapTotals: new Map(),
+    streamRecentZapsByAddress: new Map(),
+    streamZapEventIdsByAddress: new Map(),
     _theaterRuntimeInterval: null,
     likedStreamAddresses: new Set(),  // tracks which streams the user has liked
     streamLikeEventIdByAddress: new Map(),
@@ -136,6 +144,9 @@
     nip05VerificationByPubkey: new Map(),   // pubkey -> { nip05, verified, checkedAt }
     nip05VerificationPendingByPubkey: new Set(),
     nip05LookupCacheByNip05: new Map(),     // nip05 -> { pubkey, checkedAt }
+    oneShotQueryCacheByKey: new Map(),      // key -> { events, savedAt }
+    oneShotQueryInflightByKey: new Map(),   // key -> Promise<events[]>
+    liveStreamCachePersistTimer: null,
     pendingRouteAddress: '',
     pendingRouteNaddr: ''
   };
@@ -478,6 +489,68 @@
     }
   }
 
+  function cloneCachedStream(stream) {
+    if (!stream || typeof stream !== 'object') return null;
+    return {
+      id: String(stream.id || ''),
+      pubkey: normalizePubkeyHex(stream.pubkey || ''),
+      hostPubkey: normalizePubkeyHex(stream.hostPubkey || stream.pubkey || ''),
+      platformPubkey: normalizePubkeyHex(stream.platformPubkey || ''),
+      created_at: Number(stream.created_at || 0) || 0,
+      kind: Number(stream.kind || KIND_LIVE_EVENT) || KIND_LIVE_EVENT,
+      d: String(stream.d || ''),
+      address: String(stream.address || ''),
+      status: String(stream.status || 'live'),
+      title: String(stream.title || 'Untitled stream'),
+      summary: String(stream.summary || ''),
+      image: sanitizeMediaUrl(stream.image || ''),
+      streaming: sanitizeMediaUrl(stream.streaming || ''),
+      starts: Number(stream.starts || 0) || null,
+      participants: Number(stream.participants || 0) || 0
+    };
+  }
+
+  function loadLiveStreamsCache() {
+    try {
+      const raw = localStorage.getItem(LIVE_STREAMS_CACHE_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      const savedAt = Number(parsed && parsed.savedAt ? parsed.savedAt : 0);
+      const age = Date.now() - savedAt;
+      if (!savedAt || age > LIVE_STREAMS_CACHE_TTL_MS) return;
+      const items = Array.isArray(parsed && parsed.items) ? parsed.items : [];
+      items.forEach((item) => {
+        const stream = cloneCachedStream(item);
+        if (!stream || !stream.address || !stream.pubkey) return;
+        state.streamsByAddress.set(stream.address, stream);
+      });
+    } catch (_) {
+      // ignore cache read errors
+    }
+  }
+
+  function persistLiveStreamsCache() {
+    try {
+      const items = sortedLiveStreams()
+        .slice(0, LIVE_STREAMS_CACHE_MAX_ITEMS)
+        .map((stream) => cloneCachedStream(stream))
+        .filter(Boolean);
+      localStorage.setItem(LIVE_STREAMS_CACHE_STORAGE_KEY, JSON.stringify({
+        savedAt: Date.now(),
+        items
+      }));
+    } catch (_) {
+      // ignore cache write errors
+    }
+  }
+
+  function schedulePersistLiveStreamsCache() {
+    if (state.liveStreamCachePersistTimer) return;
+    state.liveStreamCachePersistTimer = setTimeout(() => {
+      state.liveStreamCachePersistTimer = null;
+      persistLiveStreamsCache();
+    }, 1200);
+  }
+
   function normalizePubkeyHex(pubkey) {
     const normalized = (pubkey || '').trim().toLowerCase();
     return /^[0-9a-f]{64}$/.test(normalized) ? normalized : '';
@@ -732,6 +805,7 @@
   }
 
   function rebuildRelayPool() {
+    state.oneShotQueryInflightByKey = new Map();
     if (state.pool) {
       try {
         state.pool.destroy();
@@ -870,6 +944,128 @@
     const vals = map.get(key);
     if (!vals || vals.length === 0) return '';
     return vals[0][0] || '';
+  }
+
+  function stableStringify(value) {
+    if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v)).join(',')}]`;
+    if (value && typeof value === 'object') {
+      const keys = Object.keys(value).sort();
+      return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+    }
+    return JSON.stringify(value);
+  }
+
+  function normalizeFilterForCache(filter) {
+    if (!filter || typeof filter !== 'object') return {};
+    const out = {};
+    Object.keys(filter).sort().forEach((key) => {
+      const val = filter[key];
+      if (Array.isArray(val)) out[key] = [...val];
+      else out[key] = val;
+    });
+    return out;
+  }
+
+  function cacheKeyForFilters(filters, scope = 'query') {
+    const normalizedFilters = (Array.isArray(filters) ? filters : [filters]).map((f) => normalizeFilterForCache(f));
+    return `${scope}:${stableStringify(normalizedFilters)}`;
+  }
+
+  function pruneOneShotQueryCache(maxEntries = ONE_SHOT_CACHE_MAX_ENTRIES) {
+    const entries = Array.from(state.oneShotQueryCacheByKey.entries());
+    if (entries.length <= maxEntries) return;
+    entries
+      .sort((a, b) => Number(a[1] && a[1].savedAt || 0) - Number(b[1] && b[1].savedAt || 0))
+      .slice(0, entries.length - maxEntries)
+      .forEach(([key]) => state.oneShotQueryCacheByKey.delete(key));
+  }
+
+  function runOneShotRelayQuery(filters, opts = {}) {
+    return new Promise((resolve) => {
+      if (!state.pool) { resolve([]); return; }
+      const timeoutMs = Math.max(200, Number(opts.timeoutMs || 1800));
+      const maxEvents = Math.max(10, Number(opts.maxEvents || 1200));
+      const eventsById = new Map();
+      const eoseByRelay = new Set();
+      const expectedEose = Math.max(1, Number((state.pool.urls && state.pool.urls.length) || 1));
+      let done = false;
+      let subId = null;
+
+      const finish = () => {
+        if (done) return;
+        done = true;
+        if (subId) {
+          try { state.pool.unsubscribe(subId); } catch (_) {}
+        }
+        clearTimeout(timer);
+        resolve(Array.from(eventsById.values()));
+      };
+
+      const timer = setTimeout(finish, timeoutMs);
+      subId = state.pool.subscribe(
+        filters,
+        {
+          event: (ev) => {
+            if (!ev || !ev.id || eventsById.has(ev.id)) return;
+            eventsById.set(ev.id, ev);
+            if (eventsById.size >= maxEvents) finish();
+          },
+          eose: (relayUrl) => {
+            const key = relayUrl || `relay_${eoseByRelay.size + 1}`;
+            eoseByRelay.add(String(key));
+            if (eoseByRelay.size >= expectedEose) finish();
+          }
+        }
+      );
+    });
+  }
+
+  function refreshOneShotQueryCache(key, filters, opts = {}) {
+    const existing = state.oneShotQueryInflightByKey.get(key);
+    if (existing) return existing;
+    const promise = runOneShotRelayQuery(filters, opts)
+      .then((events) => {
+        state.oneShotQueryCacheByKey.set(key, {
+          savedAt: Date.now(),
+          events: Array.isArray(events) ? events.slice() : []
+        });
+        pruneOneShotQueryCache();
+        return Array.isArray(events) ? events : [];
+      })
+      .finally(() => {
+        if (state.oneShotQueryInflightByKey.get(key) === promise) {
+          state.oneShotQueryInflightByKey.delete(key);
+        }
+      });
+    state.oneShotQueryInflightByKey.set(key, promise);
+    return promise;
+  }
+
+  async function fetchEventsCached(filters, opts = {}) {
+    const scope = String(opts.scope || 'query');
+    const cacheKey = String(opts.cacheKey || cacheKeyForFilters(filters, scope));
+    const ttlMs = Math.max(0, Number(opts.ttlMs || ONE_SHOT_CACHE_DEFAULT_TTL_MS));
+    const warmMs = Math.max(ttlMs, Number(opts.warmMs || ONE_SHOT_CACHE_DEFAULT_WARM_MS));
+    const allowStale = opts.allowStale !== false;
+    const force = !!opts.force;
+
+    const cached = state.oneShotQueryCacheByKey.get(cacheKey);
+    const age = cached ? (Date.now() - Number(cached.savedAt || 0)) : Number.POSITIVE_INFINITY;
+    const fresh = !!(cached && age <= ttlMs);
+    const warm = !!(cached && age <= warmMs);
+
+    if (!force && fresh) return (cached.events || []).slice();
+
+    if (!force && allowStale && warm) {
+      refreshOneShotQueryCache(cacheKey, filters, opts).catch(() => {});
+      return (cached.events || []).slice();
+    }
+
+    try {
+      return await refreshOneShotQueryCache(cacheKey, filters, opts);
+    } catch (_) {
+      return cached ? (cached.events || []).slice() : [];
+    }
   }
 
   function parseLiveEvent(ev) {
@@ -1583,6 +1779,7 @@
     const existing = state.streamsByAddress.get(stream.address);
     if (!existing || existing.created_at <= stream.created_at) {
       state.streamsByAddress.set(stream.address, stream);
+      schedulePersistLiveStreamsCache();
     }
     if (state.selectedStreamAddress === stream.address) {
       const selected = state.streamsByAddress.get(stream.address) || stream;
@@ -2755,15 +2952,7 @@
     if (title) title.textContent = stream.title;
     const summary = qs('.sib-summary');
     if (summary) summary.textContent = stream.summary || 'Live stream.';
-    const streamLinkRow = qs('#theaterStreamLinkRow');
-    const streamLinkEl = qs('#theaterStreamLink');
-    if (streamLinkEl && streamLinkRow) {
-      const naddr = encodeStreamNaddr(stream);
-      const href = naddr ? `${window.location.origin}/${naddr}` : window.location.href;
-      streamLinkEl.href = href;
-      streamLinkEl.textContent = href;
-      streamLinkRow.style.display = 'flex';
-    }
+
 
     // Host avatar
     const av = qs('.sib-av');
@@ -2823,12 +3012,8 @@
     const relays = qs('#theaterRelays');
     if (relays) relays.textContent = String(state.relays.length);
 
-    // Sats ? sum of zaps received on this stream (if tracked), else show '?'
-    const satsEl = qs('#theaterSats');
-    if (satsEl) {
-      const zapTotal = state.streamZapTotals && state.streamZapTotals.get(stream.address);
-      satsEl.textContent = zapTotal != null ? formatCount(zapTotal) : '-';
-    }
+    // Sats total for this stream from zap receipts.
+    updateTheaterSatsDisplay(stream);
 
     // Followers ? fetch from profileStats if already loaded
     const followersEl = qs('#theaterFollowers');
@@ -2896,56 +3081,39 @@
     if (!state.user || !stream || !state.pool) return '';
     const own = normalizePubkeyHex(state.user.pubkey);
     if (!own || !stream.id || !stream.address) return '';
+    const filters = [
+      { kinds: [6], authors: [own], '#e': [stream.id], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 120 },
+      { kinds: [6], authors: [own], '#a': [stream.address], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 120 },
+      { kinds: [KIND_DELETION], authors: [own], limit: 150, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 120 }
+    ];
+    const events = await fetchEventsCached(
+      filters,
+      {
+        scope: 'own-stream-boost',
+        cacheKey: `own-stream-boost:${own}:${stream.address}:${stream.id}`,
+        ttlMs: 6000,
+        warmMs: 60000,
+        timeoutMs: 1800,
+        maxEvents: 500
+      }
+    );
 
-    return new Promise((resolve) => {
-      const reposts = new Map();
-      const deletedIds = new Set();
-      let done = false;
-      let subId = null;
-
-      const finish = (id = '') => {
-        if (done) return;
-        done = true;
-        if (subId) {
-          try { state.pool.unsubscribe(subId); } catch (_) {}
-        }
-        resolve(id || '');
-      };
-
-      const timeout = setTimeout(() => finish(''), 1800);
-      const safeFinish = (id = '') => {
-        clearTimeout(timeout);
-        finish(id);
-      };
-
-      subId = state.pool.subscribe(
-        [
-          { kinds: [6], authors: [own], '#e': [stream.id], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 120 },
-          { kinds: [6], authors: [own], '#a': [stream.address], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 120 },
-          { kinds: [KIND_DELETION], authors: [own], limit: 150, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 120 }
-        ],
-        {
-          event: (ev) => {
-            if (!ev || !ev.id) return;
-            if (ev.kind === 6) {
-              reposts.set(ev.id, ev);
-              return;
-            }
-            if (ev.kind === KIND_DELETION) {
-              (ev.tags || []).forEach((t) => {
-                if (Array.isArray(t) && t[0] === 'e' && t[1]) deletedIds.add(String(t[1]));
-              });
-            }
-          },
-          eose: () => {
-            const newest = Array.from(reposts.values())
-              .sort((a, b) => (b.created_at || 0) - (a.created_at || 0))
-              .find((ev) => !deletedIds.has(ev.id));
-            safeFinish(newest ? newest.id : '');
-          }
-        }
-      );
+    const reposts = [];
+    const deletedIds = new Set();
+    events.forEach((ev) => {
+      if (!ev || !ev.id) return;
+      if (ev.kind === 6) reposts.push(ev);
+      else if (ev.kind === KIND_DELETION) {
+        (ev.tags || []).forEach((t) => {
+          if (Array.isArray(t) && t[0] === 'e' && t[1]) deletedIds.add(String(t[1]));
+        });
+      }
     });
+
+    const newest = reposts
+      .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0))
+      .find((ev) => !deletedIds.has(ev.id));
+    return newest ? newest.id : '';
   }
 
   async function refreshOwnStreamBoostState(stream) {
@@ -3187,24 +3355,18 @@
   }
 
   function _fetchEventById(eventId) {
-    return new Promise((resolve) => {
-      if (!eventId || !/^[0-9a-f]{64}$/i.test(eventId)) { resolve(null); return; }
-      let done = false;
-      const finish = (val) => {
-        if (done) return; done = true;
-        try { state.pool.unsubscribe(sub); } catch (_) {}
-        clearTimeout(timer);
-        resolve(val);
-      };
-      const timer = setTimeout(() => finish(null), 6000);
-      const sub = state.pool.subscribe(
-        [{ ids: [eventId], limit: 1 }],
-        {
-          event: (ev) => { if (ev.id === eventId) finish(ev); },
-          eose: () => finish(null)
-        }
-      );
-    });
+    if (!eventId || !/^[0-9a-f]{64}$/i.test(eventId)) return Promise.resolve(null);
+    return fetchEventsCached(
+      [{ ids: [eventId], limit: 1 }],
+      {
+        scope: 'event-by-id',
+        cacheKey: `event-by-id:${eventId}`,
+        ttlMs: 1000 * 60 * 8,
+        warmMs: 1000 * 60 * 45,
+        timeoutMs: 3000,
+        maxEvents: 4
+      }
+    ).then((events) => events.find((ev) => ev && ev.id === eventId) || null);
   }
 
   function _buildMentionPill(pubkey) {
@@ -3343,6 +3505,154 @@
     }
   }
 
+  function parseJsonSafe(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function satsFromAmountTag(amountTagValue) {
+    const raw = Number(amountTagValue || 0);
+    if (!Number.isFinite(raw) || raw <= 0) return 0;
+    // NIP-57 receipts usually carry millisats in the amount tag.
+    if (raw >= 1000) return Math.max(0, Math.floor(raw / 1000));
+    return Math.max(0, Math.floor(raw));
+  }
+
+  function parseStreamZapReceipt(ev, stream) {
+    if (!ev || ev.kind !== KIND_ZAP_RECEIPT || !stream) return null;
+
+    const tags = ev.tags || [];
+    const description = parseJsonSafe(firstTagValue(tags, 'description')) || {};
+    const descriptionTags = Array.isArray(description.tags) ? description.tags : [];
+    const targetAList = [...allTagValues(tags, 'a'), ...allTagValues(descriptionTags, 'a')];
+    const targetEList = [...allTagValues(tags, 'e'), ...allTagValues(descriptionTags, 'e')];
+    const matchesStream =
+      (stream.address && targetAList.includes(stream.address)) ||
+      (stream.id && targetEList.includes(stream.id));
+    if (!matchesStream) return null;
+
+    let sats = satsFromAmountTag(firstTagValue(tags, 'amount'));
+    if (!sats) sats = satsFromAmountTag(firstTagValue(descriptionTags, 'amount'));
+    if (!sats) return null;
+
+    const senderPubkey = normalizePubkeyHex(description.pubkey || ev.pubkey || '');
+    const senderProfile = senderPubkey ? profileFor(senderPubkey) : null;
+    const displayName = (senderProfile && (senderProfile.display_name || senderProfile.name)) ||
+      (senderPubkey ? shortHex(senderPubkey) : 'Anon');
+    const picture = (senderProfile && senderProfile.picture) || '';
+
+    return {
+      eventId: ev.id,
+      created_at: Number(ev.created_at || 0),
+      sats,
+      senderPubkey,
+      displayName,
+      picture,
+      note: String(description.content || '').trim()
+    };
+  }
+
+  function updateTheaterSatsDisplay(stream) {
+    const current = stream || state.streamsByAddress.get(state.selectedStreamAddress);
+    const satsEl = qs('#theaterSats');
+    if (!satsEl) return;
+    if (!current) {
+      satsEl.textContent = '-';
+      return;
+    }
+
+    const total = Number(state.streamZapTotals.get(current.address) || 0);
+    satsEl.textContent = formatCount(total);
+  }
+
+  function renderStreamZapList(stream) {
+    const wrap = qs('#streamZapList');
+    const current = stream || state.streamsByAddress.get(state.selectedStreamAddress);
+    if (!wrap) return;
+    if (!current) {
+      wrap.innerHTML = '';
+      return;
+    }
+
+    const entries = (state.streamRecentZapsByAddress.get(current.address) || []).slice(0, 3);
+    wrap.innerHTML = '';
+    if (!entries.length) return;
+
+    entries.forEach((entry) => {
+      const sender = normalizePubkeyHex(entry.senderPubkey || '');
+      const profile = sender ? profileFor(sender) : null;
+      const senderName = (profile && (profile.display_name || profile.name)) || entry.displayName || (sender ? shortHex(sender) : 'Anon');
+      const senderPicture = (profile && profile.picture) || entry.picture || '';
+
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'stream-zap-pill';
+      chip.title = entry.note || `${formatCount(entry.sats)} sats`;
+      if (sender) {
+        chip.addEventListener('click', () => showProfileByPubkey(sender));
+      }
+
+      const av = document.createElement('div');
+      av.className = 'hosted-by-av';
+      setAvatarEl(av, senderPicture, pickAvatar(sender || senderName));
+
+      const inner = document.createElement('div');
+      inner.className = 'hosted-by-inner';
+
+      const amount = document.createElement('span');
+      amount.className = 'hosted-by-label';
+      amount.textContent = `${formatCount(entry.sats)} sats`;
+
+      const name = document.createElement('span');
+      name.className = 'hosted-by-name';
+      name.textContent = senderName;
+
+      inner.appendChild(amount);
+      inner.appendChild(name);
+      chip.appendChild(av);
+      chip.appendChild(inner);
+      wrap.appendChild(chip);
+
+      if (sender && !state.profilesByPubkey.has(sender)) {
+        fetchProfileIfNeeded(sender).then(() => {
+          if (state.selectedStreamAddress === current.address) renderStreamZapList(current);
+        }).catch(() => {});
+      }
+    });
+  }
+
+  function addStreamZapReceipt(ev, stream) {
+    const current = stream || state.streamsByAddress.get(state.selectedStreamAddress);
+    if (!current || !ev || !ev.id) return false;
+
+    const parsed = parseStreamZapReceipt(ev, current);
+    if (!parsed) return false;
+
+    if (!state.streamZapEventIdsByAddress.has(current.address)) {
+      state.streamZapEventIdsByAddress.set(current.address, new Set());
+    }
+    const seen = state.streamZapEventIdsByAddress.get(current.address);
+    if (seen.has(parsed.eventId)) return false;
+    seen.add(parsed.eventId);
+
+    const prevTotal = Number(state.streamZapTotals.get(current.address) || 0);
+    state.streamZapTotals.set(current.address, prevTotal + Number(parsed.sats || 0));
+
+    const list = state.streamRecentZapsByAddress.get(current.address) || [];
+    list.unshift(parsed);
+    list.sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
+    state.streamRecentZapsByAddress.set(current.address, list.slice(0, 20));
+
+    updateTheaterSatsDisplay(current);
+    renderStreamZapList(current);
+    return true;
+  }
   function chatReactionKey(messageId, pubkey) {
     return `${messageId}:${pubkey}`;
   }
@@ -3636,56 +3946,47 @@
     if (!own) return '';
     const wantedKey = normalizeReactionContentKey(reactionKey);
     if (!wantedKey || wantedKey === '-') return '';
+    const filters = [
+      { kinds: [KIND_REACTION], authors: [own], '#e': [stream.id], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 },
+      { kinds: [KIND_REACTION], authors: [own], '#a': [stream.address], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 },
+      { kinds: [KIND_DELETION], authors: [own], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 }
+    ];
+    const events = await fetchEventsCached(
+      filters,
+      {
+        scope: 'own-stream-reaction',
+        cacheKey: `own-stream-reaction:${own}:${stream.address}:${stream.id}:${wantedKey}`,
+        ttlMs: 5000,
+        warmMs: 45000,
+        timeoutMs: 2200,
+        maxEvents: 420
+      }
+    );
 
-    return new Promise((resolve) => {
-      const reactions = new Map();
-      const deletedIds = new Set();
-      let done = false;
-      let subId = null;
-      const finish = (id = '') => {
-        if (done) return;
-        done = true;
-        if (subId) {
-          try { state.pool.unsubscribe(subId); } catch (_) {}
-        }
-        resolve(id || '');
-      };
-
-      subId = state.pool.subscribe(
-        [
-          { kinds: [KIND_REACTION], authors: [own], '#e': [stream.id], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 },
-          { kinds: [KIND_REACTION], authors: [own], '#a': [stream.address], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 },
-          { kinds: [KIND_DELETION], authors: [own], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 }
-        ],
-        {
-          event: (ev) => {
-            if (ev.kind === KIND_REACTION) {
-              const reaction = parseReactionMeta(ev.content, ev.tags);
-              if (!reaction || reaction.key !== wantedKey) return;
-              const aTag = firstTagValue(ev.tags, 'a');
-              if (aTag && aTag !== stream.address) return;
-              const eTag = firstTagValue(ev.tags, 'e');
-              if (eTag && eTag !== stream.id) return;
-              reactions.set(ev.id, ev);
-              return;
-            }
-            if (ev.kind === KIND_DELETION) {
-              allTagValues(ev.tags, 'e').forEach((id) => {
-                if (/^[0-9a-f]{64}$/i.test(id)) deletedIds.add(id);
-              });
-            }
-          },
-          eose: () => {}
-        }
-      );
-
-      setTimeout(() => {
-        const active = Array.from(reactions.values())
-          .filter((ev) => !deletedIds.has(ev.id))
-          .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
-        finish(active.length ? active[0].id : '');
-      }, 4500);
+    const reactions = [];
+    const deletedIds = new Set();
+    events.forEach((ev) => {
+      if (!ev) return;
+      if (ev.kind === KIND_REACTION) {
+        const reaction = parseReactionMeta(ev.content, ev.tags);
+        if (!reaction || reaction.key !== wantedKey) return;
+        const aTag = firstTagValue(ev.tags, 'a');
+        if (aTag && aTag !== stream.address) return;
+        const eTag = firstTagValue(ev.tags, 'e');
+        if (eTag && eTag !== stream.id) return;
+        reactions.push(ev);
+        return;
+      }
+      if (ev.kind === KIND_DELETION) {
+        allTagValues(ev.tags, 'e').forEach((id) => {
+          if (/^[0-9a-f]{64}$/i.test(id)) deletedIds.add(id);
+        });
+      }
     });
+    const active = reactions
+      .filter((ev) => !deletedIds.has(ev.id))
+      .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
+    return active.length ? active[0].id : '';
   }
 
   async function findOwnStreamLikeReactionId(stream) {
@@ -3696,53 +3997,44 @@
     if (!state.user || !state.pool || !messageId || !stream) return '';
     const own = normalizePubkeyHex(state.user.pubkey);
     if (!own) return '';
+    const filters = [
+      { kinds: [KIND_REACTION], authors: [own], '#e': [messageId], limit: 100, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 },
+      { kinds: [KIND_DELETION], authors: [own], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 }
+    ];
+    const events = await fetchEventsCached(
+      filters,
+      {
+        scope: 'own-chat-like',
+        cacheKey: `own-chat-like:${own}:${stream.address}:${messageId}`,
+        ttlMs: 5000,
+        warmMs: 45000,
+        timeoutMs: 2200,
+        maxEvents: 320
+      }
+    );
 
-    return new Promise((resolve) => {
-      const reactions = new Map();
-      const deletedIds = new Set();
-      let done = false;
-      let subId = null;
-      const finish = (id = '') => {
-        if (done) return;
-        done = true;
-        if (subId) {
-          try { state.pool.unsubscribe(subId); } catch (_) {}
-        }
-        resolve(id || '');
-      };
-
-      subId = state.pool.subscribe(
-        [
-          { kinds: [KIND_REACTION], authors: [own], '#e': [messageId], limit: 100, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 },
-          { kinds: [KIND_DELETION], authors: [own], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30 }
-        ],
-        {
-          event: (ev) => {
-            if (ev.kind === KIND_REACTION) {
-              const content = (ev.content || '').trim();
-              if (content !== '+') return;
-              const aTag = firstTagValue(ev.tags, 'a');
-              if (aTag && aTag !== stream.address) return;
-              reactions.set(ev.id, ev);
-              return;
-            }
-            if (ev.kind === KIND_DELETION) {
-              allTagValues(ev.tags, 'e').forEach((id) => {
-                if (/^[0-9a-f]{64}$/i.test(id)) deletedIds.add(id);
-              });
-            }
-          },
-          eose: () => {}
-        }
-      );
-
-      setTimeout(() => {
-        const active = Array.from(reactions.values())
-          .filter((ev) => !deletedIds.has(ev.id))
-          .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
-        finish(active.length ? active[0].id : '');
-      }, 4500);
+    const reactions = [];
+    const deletedIds = new Set();
+    events.forEach((ev) => {
+      if (!ev) return;
+      if (ev.kind === KIND_REACTION) {
+        const content = (ev.content || '').trim();
+        if (content !== '+') return;
+        const aTag = firstTagValue(ev.tags, 'a');
+        if (aTag && aTag !== stream.address) return;
+        reactions.push(ev);
+        return;
+      }
+      if (ev.kind === KIND_DELETION) {
+        allTagValues(ev.tags, 'e').forEach((id) => {
+          if (/^[0-9a-f]{64}$/i.test(id)) deletedIds.add(id);
+        });
+      }
     });
+    const active = reactions
+      .filter((ev) => !deletedIds.has(ev.id))
+      .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
+    return active.length ? active[0].id : '';
   }
 
   function postReactionPendingKey(noteId, reactionKey) {
@@ -3755,53 +4047,44 @@
     if (!own) return '';
     const wantedKey = normalizeReactionContentKey(reactionKey);
     if (!wantedKey || wantedKey === '-') return '';
+    const filters = [
+      { kinds: [KIND_REACTION], authors: [own], '#e': [noteId], limit: 100, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 90 },
+      { kinds: [KIND_DELETION], authors: [own], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 90 }
+    ];
+    const events = await fetchEventsCached(
+      filters,
+      {
+        scope: 'own-post-reaction',
+        cacheKey: `own-post-reaction:${own}:${noteId}:${wantedKey}`,
+        ttlMs: 5000,
+        warmMs: 45000,
+        timeoutMs: 2200,
+        maxEvents: 320
+      }
+    );
 
-    return new Promise((resolve) => {
-      const reactions = new Map();
-      const deletedIds = new Set();
-      let done = false;
-      let subId = null;
-      const finish = (id = '') => {
-        if (done) return;
-        done = true;
-        if (subId) {
-          try { state.pool.unsubscribe(subId); } catch (_) {}
-        }
-        resolve(id || '');
-      };
-
-      subId = state.pool.subscribe(
-        [
-          { kinds: [KIND_REACTION], authors: [own], '#e': [noteId], limit: 100, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 90 },
-          { kinds: [KIND_DELETION], authors: [own], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 90 }
-        ],
-        {
-          event: (ev) => {
-            if (ev.kind === KIND_REACTION) {
-              const reaction = parseReactionMeta(ev.content, ev.tags);
-              if (!reaction || reaction.key !== wantedKey) return;
-              const eTag = firstTagValue(ev.tags, 'e');
-              if (eTag && eTag !== noteId) return;
-              reactions.set(ev.id, ev);
-              return;
-            }
-            if (ev.kind === KIND_DELETION) {
-              allTagValues(ev.tags, 'e').forEach((id) => {
-                if (/^[0-9a-f]{64}$/i.test(id)) deletedIds.add(id);
-              });
-            }
-          },
-          eose: () => {}
-        }
-      );
-
-      setTimeout(() => {
-        const active = Array.from(reactions.values())
-          .filter((ev) => !deletedIds.has(ev.id))
-          .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
-        finish(active.length ? active[0].id : '');
-      }, 4500);
+    const reactions = [];
+    const deletedIds = new Set();
+    events.forEach((ev) => {
+      if (!ev) return;
+      if (ev.kind === KIND_REACTION) {
+        const reaction = parseReactionMeta(ev.content, ev.tags);
+        if (!reaction || reaction.key !== wantedKey) return;
+        const eTag = firstTagValue(ev.tags, 'e');
+        if (eTag && eTag !== noteId) return;
+        reactions.push(ev);
+        return;
+      }
+      if (ev.kind === KIND_DELETION) {
+        allTagValues(ev.tags, 'e').forEach((id) => {
+          if (/^[0-9a-f]{64}$/i.test(id)) deletedIds.add(id);
+        });
+      }
     });
+    const active = reactions
+      .filter((ev) => !deletedIds.has(ev.id))
+      .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
+    return active.length ? active[0].id : '';
   }
 
   function reactionMetaFromPicker(codeInput, urlInput = '') {
@@ -4093,20 +4376,25 @@
     if (!pubkey) return Promise.resolve();
     const existing = state.profilesByPubkey.get(pubkey);
     if (existing && (existing.name || existing.display_name || existing.picture)) return Promise.resolve();
-    return new Promise((resolve) => {
-      const sub = state.pool.subscribe(
-        [{ kinds: [KIND_PROFILE], authors: [pubkey], limit: 1 }],
-        {
-          event: (ev) => {
-            if (ev.kind !== KIND_PROFILE || ev.pubkey !== pubkey) return;
-            const parsed = parseProfile(ev);
-            state.profilesByPubkey.set(pubkey, parsed);
-            ensureNip05Verification(pubkey, parsed.nip05 || '').catch(() => {});
-          },
-          eose: () => { try { state.pool.unsubscribe(sub); } catch (_) {} resolve(); }
-        }
-      );
-    });
+    return fetchEventsCached(
+      [{ kinds: [KIND_PROFILE], authors: [pubkey], limit: 2 }],
+      {
+        scope: 'profile-by-pubkey',
+        cacheKey: `profile-by-pubkey:${pubkey}`,
+        ttlMs: 1000 * 60 * 2,
+        warmMs: 1000 * 60 * 20,
+        timeoutMs: 2200,
+        maxEvents: 10
+      }
+    ).then((events) => {
+      const latest = (events || [])
+        .filter((ev) => ev && ev.kind === KIND_PROFILE && ev.pubkey === pubkey)
+        .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0))[0];
+      if (!latest) return;
+      const parsed = parseProfile(latest);
+      state.profilesByPubkey.set(pubkey, parsed);
+      ensureNip05Verification(pubkey, parsed.nip05 || '').catch(() => {});
+    }).catch(() => {});
   }
 
   function subscribeLive() {
@@ -4131,6 +4419,7 @@
         },
         eose: () => {
           renderLiveGrid();
+          persistLiveStreamsCache();
           tryOpenPendingRouteStream();
           if (!state.featuredCycleTimer) startHeroCycle();
           const streams = sortedLiveStreams();
@@ -4163,7 +4452,12 @@
     state.streamReactionEventById = new Map();
     state.streamOwnReactionIdByKey = new Map();
     state.streamReactionPublishPendingByKey = new Set();
+    state.streamZapTotals.set(stream.address, 0);
+    state.streamRecentZapsByAddress.set(stream.address, []);
+    state.streamZapEventIdsByAddress.set(stream.address, new Set());
     renderStreamReactionsUi(stream);
+    updateTheaterSatsDisplay(stream);
+    renderStreamZapList(stream);
 
     const seenIds = new Set();
     const unknownPubkeys = new Set(); // pubkeys seen in chat but not yet in profile cache
@@ -4225,8 +4519,20 @@
       }
     });
 
+    const reactionFilters = [
+      { kinds: [KIND_REACTION, KIND_DELETION], '#a': [stream.address], limit: 1200, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 },
+      { kinds: [KIND_ZAP_RECEIPT], '#a': [stream.address], limit: 600, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 }
+    ];
+    if (stream.id) {
+      reactionFilters.push({ kinds: [KIND_ZAP_RECEIPT], '#e': [stream.id], limit: 600, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 });
+    }
+    const pTargets = [...new Set([stream.pubkey, stream.hostPubkey].filter((pk) => /^[0-9a-f]{64}$/i.test(pk || '')) )];
+    if (pTargets.length) {
+      reactionFilters.push({ kinds: [KIND_ZAP_RECEIPT], '#p': pTargets, limit: 600, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 });
+    }
+
     state.chatReactionSubId = state.pool.subscribe(
-      [{ kinds: [KIND_REACTION, KIND_DELETION], '#a': [stream.address], limit: 1200, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 }],
+      reactionFilters,
       {
         event: (ev) => {
           if (!ev || !ev.id) return;
@@ -4247,6 +4553,11 @@
             if (!reactionContent || reactionContent === '-') return;
             applyChatLikeReaction(targetId, normalizePubkeyHex(ev.pubkey), ev.id);
             updateChatLikeUi(targetId);
+            return;
+          }
+
+          if (ev.kind === KIND_ZAP_RECEIPT) {
+            addStreamZapReceipt(ev, stream);
             return;
           }
 
@@ -7655,6 +7966,9 @@
       state.contactsPTagByPubkey = new Map(); state.contactsOtherTags = [];
       state.followPublishPending = false;
       state.nip51Lists = new Map(); state.savedExternalLists = [];
+      state.streamZapTotals = new Map();
+      state.streamRecentZapsByAddress = new Map();
+      state.streamZapEventIdsByAddress = new Map();
       state.likedStreamAddresses = new Set();
       state.streamLikeEventIdByAddress = new Map();
       state.streamLikePublishPending = false;
@@ -7688,6 +8002,12 @@
       state.nip05VerificationByPubkey = new Map();
       state.nip05VerificationPendingByPubkey = new Set();
       state.nip05LookupCacheByNip05 = new Map();
+      state.oneShotQueryCacheByKey = new Map();
+      state.oneShotQueryInflightByKey = new Map();
+      if (state.liveStreamCachePersistTimer) {
+        clearTimeout(state.liveStreamCachePersistTimer);
+        state.liveStreamCachePersistTimer = null;
+      }
       window.closeAllDD();
       ['goLiveModal','endModal','loginModal','settingsModal','faqModal','shareModal','reactionPickerModal'].forEach((id) => {
         const el = qs('#' + id); if (el) el.classList.remove('open');
@@ -7801,6 +8121,7 @@
     loadSettingsFromStorage();
     loadFollowedPubkeys();
     loadSavedExternalLists();
+    loadLiveStreamsCache();
     applySettingsToDocument();
     restoreRouteFromSpaFallbackQuery();
 
@@ -7817,6 +8138,7 @@
     const pill = qs('#navUserPill');
     if (pill) pill.addEventListener('click', (e) => { e.stopPropagation(); window.toggleDD('profile'); });
 
+    if (state.streamsByAddress.size) renderLiveGrid();
     initRelay();
     await tryRestoreLocalLogin();
     setUserUi();
@@ -7830,4 +8152,18 @@
   document.addEventListener('DOMContentLoaded', init);
 })();
 
-
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

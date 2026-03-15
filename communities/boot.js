@@ -6,17 +6,18 @@ let app = null;
 
 function getContext() {
   const ctx = window.__SIFAKA_CONTEXT || {};
-  const relays = typeof ctx.getRelays === 'function' ? (ctx.getRelays() || []) : [
-    'wss://relay.damus.io',
-    'wss://nos.lol',
-    'wss://relay.snort.social'
-  ];
+  const relays = typeof ctx.getRelays === 'function'
+    ? (ctx.getRelays() || [])
+    : ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.snort.social'];
 
   const user = typeof ctx.getUser === 'function' ? ctx.getUser() : null;
+  const userPubkey = user && user.pubkey ? String(user.pubkey) : '';
 
   return {
     relays,
-    userPubkey: user && user.pubkey ? user.pubkey : 'pub_craig',
+    user,
+    userPubkey,
+    isAuthenticated: !!userPubkey,
     ctx
   };
 }
@@ -32,12 +33,87 @@ function ensureApp() {
     currentUserPubkey: context.userPubkey
   });
   const nostrBridge = createNostrBridge({ relays: context.relays });
-  const ui = createCommunitiesUI({ root, store, nostrBridge, appContext: context.ctx });
+  const ui = createCommunitiesUI({
+    root,
+    store,
+    nostrBridge,
+    appContext: context.ctx,
+    session: {
+      user: context.user,
+      isAuthenticated: context.isAuthenticated
+    }
+  });
 
-  nostrBridge.connectAll();
+  let graphSub = null;
+  let offStatus = null;
+
+  function stopBridgeSubscriptions() {
+    if (graphSub && typeof graphSub.close === 'function') {
+      try { graphSub.close(); } catch (_) {}
+    }
+    graphSub = null;
+
+    if (offStatus) {
+      try { offStatus(); } catch (_) {}
+    }
+    offStatus = null;
+  }
+
+  function startBridgeSubscriptions() {
+    if (graphSub) return;
+
+    offStatus = nostrBridge.on('status', (payload) => {
+      store.setRelayStatus(payload.relay, payload.state);
+    });
+
+    graphSub = nostrBridge.subscribeCommunityGraph({
+      onProfile(profile) {
+        store.ingestProfile(profile);
+      },
+      onCommunity(community) {
+        store.ingestCommunity(community);
+      },
+      onCommunityMembers39002(data39002) {
+        store.ingestCommunityMembers(data39002);
+      },
+      onCommunityModerators39003(data39003) {
+        store.ingestCommunityModerators(data39003);
+      },
+      onChannel(channel) {
+        store.ingestChannel(channel);
+      },
+      onMessage(message) {
+        store.ingestMessage(message);
+      },
+      onReaction(reaction) {
+        store.ingestReaction(reaction);
+      },
+      onDeletion(deletion) {
+        store.ingestDeletion(deletion);
+      },
+      onMembershipList(membership) {
+        store.ingestMembershipList(membership);
+      }
+    }, {
+      id: 'sifaka_communities_graph',
+      limit: 700
+    });
+
+    nostrBridge.connectAll();
+  }
 
   app = {
     mount() {
+      const next = getContext();
+      store.setCurrentUser(next.userPubkey || '');
+      ui.setSession({ user: next.user, isAuthenticated: next.isAuthenticated });
+
+      if (next.isAuthenticated) {
+        startBridgeSubscriptions();
+      } else {
+        stopBridgeSubscriptions();
+      }
+
       try {
         ui.mount();
       } catch (err) {
@@ -47,10 +123,18 @@ function ensureApp() {
     },
     unmount() {
       ui.unmount();
+      stopBridgeSubscriptions();
     },
     refreshContext() {
-      // For now this is a no-op because store is local.
-      // Kept so auth/session transitions can rebind in future.
+      const next = getContext();
+      store.setCurrentUser(next.userPubkey || '');
+      ui.setSession({ user: next.user, isAuthenticated: next.isAuthenticated });
+      if (next.isAuthenticated) {
+        startBridgeSubscriptions();
+      } else {
+        stopBridgeSubscriptions();
+      }
+      ui.rerender();
     },
     capabilities() {
       return nostrBridge.capabilities();

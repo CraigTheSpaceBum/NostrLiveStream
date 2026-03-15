@@ -1,4 +1,4 @@
-﻿(function () {
+(function () {
   const ns = window.SifakaPageViews = window.SifakaPageViews || {};
 
   ns.mountCommunities = function mountCommunities() {
@@ -11,7 +11,7 @@
       console.error('Communities mount failed', err);
     }
 
-    return import('./communities/boot.js')
+    return import('../communities/boot.js')
       .then(() => {
         if (window.SifakaCommunities && typeof window.SifakaCommunities.mount === 'function') {
           window.SifakaCommunities.mount();

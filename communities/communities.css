@@ -858,3 +858,120 @@
     z-index: 40;
   }
 }
+
+.sc-auth-gate {
+  display: flex;
+  min-height: calc(100vh - 56px);
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.sc-auth-card {
+  width: min(560px, 94vw);
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  background: var(--surface);
+  padding: 1rem;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, .65);
+}
+
+.sc-auth-card h2 {
+  margin: 0;
+  font-family: 'Syne', sans-serif;
+  font-size: 1.2rem;
+}
+
+.sc-auth-card p {
+  color: var(--text2);
+  margin: .45rem 0 .6rem;
+}
+
+.sc-auth-card ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--text2);
+  font-size: .78rem;
+  line-height: 1.5;
+}
+
+.sc-auth-card button {
+  margin-top: .8rem;
+  background: linear-gradient(135deg, var(--accent), #f7b731);
+  border: 0;
+  border-radius: 10px;
+  color: #fff;
+  font-weight: 700;
+  padding: .5rem .9rem;
+  cursor: pointer;
+}
+
+.sc-modal.sc-modal-wide {
+  width: min(900px, 96vw);
+}
+
+.sc-form-grid.sc-form-grid-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.sc-form-grid .full {
+  grid-column: 1 / -1;
+}
+
+.sc-check-grid {
+  margin-top: .6rem;
+  display: grid;
+  gap: .35rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.sc-check-grid label {
+  font-size: .72rem;
+  color: var(--text2);
+  display: flex;
+  align-items: center;
+  gap: .38rem;
+}
+
+.sc-role-picker {
+  display: flex;
+  gap: .35rem;
+  flex-wrap: wrap;
+}
+
+.sc-role-btn {
+  border: 1px solid var(--border2);
+  background: var(--surface2);
+  border-radius: 9px;
+  color: var(--text2);
+  padding: .3rem .55rem;
+  cursor: pointer;
+  text-transform: capitalize;
+}
+
+.sc-role-btn.active {
+  border-color: var(--accent);
+  color: var(--text);
+  background: rgba(232, 70, 10, .13);
+}
+
+.sc-toast {
+  position: fixed;
+  right: 14px;
+  bottom: 16px;
+  z-index: 140;
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: .74rem;
+  padding: .45rem .65rem;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, .55);
+}
+
+@media (max-width: 900px) {
+  .sc-form-grid.sc-form-grid-2,
+  .sc-check-grid {
+    grid-template-columns: 1fr;
+  }
+}
