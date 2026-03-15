@@ -2746,6 +2746,17 @@
      ========================================================= */
   const HERO_CYCLE_MS = 120000;
 
+  function isHomeViewActive() {
+    const home = qs('#homePage');
+    return !!(home && home.classList.contains('active'));
+  }
+
+  function shouldRunHeroCycle() {
+    if (!isHomeViewActive()) return false;
+    const isHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+    return !isHidden;
+  }
+
   function heroFeaturedStreams() {
     return sortedLiveStreams().filter(
       (s) => {
@@ -2835,6 +2846,19 @@
     state.heroPlaybackToken++;
     state.featuredCurrentAddress = '';
     setActiveHeroViewerAddress('');
+    const playerEl = qs('#heroPlayer');
+    if (playerEl) {
+      playerEl.querySelectorAll('video').forEach((video) => {
+        try {
+          video.pause();
+          video.removeAttribute('src');
+          video.load();
+        } catch (_) {}
+        try { video.remove(); } catch (_) {}
+      });
+    }
+    const ovEl = qs('#heroPlayOv');
+    if (ovEl) ovEl.style.display = '';
     if (state.heroHlsInstance) {
       try { state.heroHlsInstance.destroy(); } catch (_) {}
       state.heroHlsInstance = null;
@@ -2973,6 +2997,10 @@
 
   /* ---- Navigate to a specific index ---- */
   function heroGoTo(idx, userInitiated) {
+    if (!shouldRunHeroCycle()) {
+      stopHeroCycle();
+      return;
+    }
     const streams = heroFeaturedStreams();
     if (!streams.length) return;
     state.featuredIndex = ((idx % streams.length) + streams.length) % streams.length;
@@ -2997,6 +3025,10 @@
 
   /* ---- Advance by delta (wraps) ---- */
   function heroAdvance(delta) {
+    if (!shouldRunHeroCycle()) {
+      stopHeroCycle();
+      return;
+    }
     const streams = heroFeaturedStreams();
     if (!streams.length) return;
     heroGoTo(state.featuredIndex + delta, false);
@@ -3005,6 +3037,10 @@
 
   /* ---- Reset / restart the 120-s cycle timer ---- */
   function resetHeroCycle() {
+    if (!shouldRunHeroCycle()) {
+      stopHeroCycle();
+      return;
+    }
     if (state.featuredCycleTimer) clearInterval(state.featuredCycleTimer);
     startProgressBar();
     state.featuredCycleTimer = setInterval(() => heroAdvance(1), HERO_CYCLE_MS);
@@ -3012,6 +3048,7 @@
 
   /* ---- Start hero cycle on page load ---- */
   function startHeroCycle() {
+    if (!shouldRunHeroCycle()) return;
     const streams = heroFeaturedStreams();
     if (!streams.length) return;
     state.featuredIndex = Math.floor(Math.random() * streams.length);
@@ -4719,14 +4756,18 @@
 
   function renderChatMessage(ev) {
     const sc = qs('#chatScroll');
-    if (!sc) return;
+    if (!sc || !ev || !ev.id) return;
+    if (sc.querySelector(`.cmsg[data-msg-id="${CSS.escape(ev.id)}"]`)) return;
+
+    const wasNearBottom = (sc.scrollHeight - sc.scrollTop - sc.clientHeight) <= 28;
     state.chatMessageEventsById.set(ev.id, ev);
     const p = profileFor(ev.pubkey);
     const row = document.createElement('div');
     row.className = 'cmsg';
     row.dataset.pubkey = ev.pubkey;
     row.dataset.msgId = ev.id;
-    row.innerHTML = `<div class="c-av"></div><div class="c-body"><div class="c-name-row"><span class="c-name"></span><span class="c-time"></span></div><div class="c-text"></div></div><div class="chat-msg-actions"><button class="cma-btn like-cma chat-like-btn" title="Like">❤ <span class="chat-like-count">0</span></button></div>`;
+    row.dataset.createdAt = String(Number(ev.created_at || 0) || 0);
+    row.innerHTML = `<div class="c-av"></div><div class="c-body"><div class="c-name-row"><span class="c-name"></span><span class="c-time"></span></div><div class="c-text"></div></div><div class="chat-msg-actions"><button class="cma-btn like-cma chat-like-btn" title="Like">&#10084; <span class="chat-like-count">0</span></button></div>`;
     const avEl = qs('.c-av', row);
     setAvatarEl(avEl, p.picture || '', pickAvatar(ev.pubkey));
     const chatNip05 = getVerifiedNip05ForPubkey(ev.pubkey, p.nip05 || '');
@@ -4756,10 +4797,26 @@
       e.stopPropagation();
       window.toggleChatLikeMessage(ev.id);
     });
-    sc.appendChild(row);
+
+    // Relay delivery order is not guaranteed, so keep chat sorted by created_at.
+    const targetTs = Number(ev.created_at || 0) || 0;
+    let inserted = false;
+    for (let i = sc.children.length - 1; i >= 0; i -= 1) {
+      const existing = sc.children[i];
+      if (!existing || !existing.classList || !existing.classList.contains('cmsg')) continue;
+      const existingTs = Number(existing.dataset.createdAt || 0) || 0;
+      const existingId = existing.dataset.msgId || '';
+      if (existingTs < targetTs || (existingTs === targetTs && existingId <= ev.id)) {
+        existing.insertAdjacentElement('afterend', row);
+        inserted = true;
+        break;
+      }
+    }
+    if (!inserted) sc.insertAdjacentElement('afterbegin', row);
+
     updateChatLikeUi(ev.id);
-    sc.scrollTop = sc.scrollHeight;
-    while (sc.children.length > 120) sc.removeChild(sc.firstChild);
+    while (sc.children.length > 300) sc.removeChild(sc.firstChild);
+    if (wasNearBottom) sc.scrollTop = sc.scrollHeight;
   }
 
   function setLoggedInUi(on) {
@@ -4899,7 +4956,7 @@
           renderLiveGrid();
           persistLiveStreamsCache();
           tryOpenPendingRouteStream();
-          if (!state.featuredCycleTimer) startHeroCycle();
+          if (shouldRunHeroCycle() && !state.featuredCycleTimer) startHeroCycle();
           const streams = sortedLiveStreams();
           // Fetch profiles for both the event publisher AND actual streamer
           const pubSet = new Set();
@@ -4975,12 +5032,27 @@
       );
     }
 
+    const nowSec = Math.floor(Date.now() / 1000);
+    const streamStart = Number(stream.starts || stream.created_at || 0) || 0;
+    const chatSince = streamStart
+      ? Math.max(0, streamStart - 60 * 60 * 2)
+      : (nowSec - 60 * 60 * 24);
+    const chatHistoryLimit = 1200;
+
     const filters = [{
       kinds: [KIND_LIVE_CHAT],
       '#a': [stream.address],
-      limit: 200,
-      since: Math.floor(Date.now() / 1000) - 60 * 60 * 8
+      limit: chatHistoryLimit,
+      since: chatSince
     }];
+    if (stream.id) {
+      filters.push({
+        kinds: [KIND_LIVE_CHAT],
+        '#e': [stream.id],
+        limit: chatHistoryLimit,
+        since: chatSince
+      });
+    }
 
     state.chatSubId = state.pool.subscribe(filters, {
       event: (ev) => {
@@ -8865,6 +8937,13 @@
     attachSeparatedPageModules();
     initEmojiPicker();
     wireEvents();
+    document.addEventListener('visibilitychange', () => {
+      if (shouldRunHeroCycle()) {
+        if (!state.featuredCycleTimer) startHeroCycle();
+      } else {
+        stopHeroCycle();
+      }
+    });
     window.addEventListener('popstate', () => {
       syncViewFromLocation({ fallbackMode: 'skip' });
     });
