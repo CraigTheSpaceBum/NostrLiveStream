@@ -17,7 +17,11 @@
 <nav>
   <!-- Logo (left) -->
   <div class="logo-wrap">
-    <button class="logo" id="logoBtn"><img src="logo.png" alt="Sifaka Live" class="nav-logo-img"> Sifaka Live</button>
+    <button class="logo" id="logoBtn">
+      <img src="logo.png" alt="Sifaka" class="nav-logo-img">
+      <span class="logo-text-8bit">Sifaka</span>
+      <span class="logo-live-pill">LIVE</span>
+    </button>
     <div class="nav-dropdown" id="logoDropdown">
       <button class="dd-item" onclick="showPage('home');closeAllDD()"><span class="ddi">&#128308;</span>Live Now <span class="dd-count">24</span></button>
       <button class="dd-item" onclick="showCommunities();closeAllDD()"><span class="ddi">&#127970;</span>Communities</button>
@@ -405,6 +409,31 @@
         <div class="sm-row"><div><div class="sm-row-label">Compact chat mode</div><div class="sm-row-desc">Denser message layout in stream chat</div></div><div class="toggle setting-toggle" id="setCompactToggle" onclick="toggleSetting(this)"></div></div>
       </div>
 
+      <div class="smv2-section">
+        <div class="smv2-section-title">Cache</div>
+        <div class="sm-row">
+          <div>
+            <div class="sm-row-label">Query cache TTL (seconds)</div>
+            <div class="sm-row-desc">How long a relay query result stays fresh</div>
+          </div>
+          <input id="settingsCacheQueryTtlSec" type="number" min="1" max="600" step="1" style="max-width:120px;">
+        </div>
+        <div class="sm-row">
+          <div>
+            <div class="sm-row-label">Warm cache window (seconds)</div>
+            <div class="sm-row-desc">Serve stale cache while refreshing in background</div>
+          </div>
+          <input id="settingsCacheWarmSec" type="number" min="5" max="7200" step="1" style="max-width:120px;">
+        </div>
+        <div class="sm-row">
+          <div>
+            <div class="sm-row-label">Live feed cache TTL (seconds)</div>
+            <div class="sm-row-desc">How long live stream snapshots are reused on load</div>
+          </div>
+          <input id="settingsCacheLiveFeedTtlSec" type="number" min="10" max="1800" step="1" style="max-width:120px;">
+        </div>
+      </div>
+
       <div class="smv2-save-row">
         <button class="btn btn-primary" onclick="saveAppSettings()">Save App Settings →</button>
       </div>
@@ -471,6 +500,22 @@
         <button class="btn btn-ghost" onclick="closeReactionPicker()">Cancel</button>
         <button class="btn btn-primary" onclick="submitCustomReactionPicker()">Send</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========= COMPOSE UPLOAD ========= -->
+<div class="modal-ov" id="composeUploadModal" onclick="closeComposeUploadModal(event)">
+  <div class="settings-modal share-modal compose-upload-modal">
+    <button class="mclose" style="position:absolute;top:1rem;right:1rem;" onclick="closeComposeUploadModal()">x</button>
+    <div class="sm-hd"><div class="sm-title">Upload Media</div></div>
+    <div class="share-modal-body">
+      <div class="compose-upload-grid">
+        <button class="share-choice-btn" onclick="selectComposeUploadSource('nostr_build')"><span>Nostr.build</span><span class="sub">NIP-96 upload from this device</span></button>
+        <button class="share-choice-btn" onclick="promptComposeMediaUrl()"><span>Paste URL</span><span class="sub">Use an existing image/video link</span></button>
+      </div>
+      <div class="compose-upload-status" id="composeUploadStatus"></div>
+      <input id="composeUploadFileInput" type="file" accept="image/*,video/*" style="display:none;" onchange="uploadComposeFile(event)">
     </div>
   </div>
 </div>
@@ -731,16 +776,18 @@
         <div class="profile-bio-box">
           <div class="profile-bio-grid" id="profileBioGrid">
             <div>
-              <div class="profile-bio clamped" id="profBio">No bio yet.</div>
-              <button class="profile-show-more" id="profBioToggle" style="display:none;" onclick="toggleProfileBio()">Show more</button>
-              <div class="profile-bio-links">
-                <div class="profile-bio-meta" id="profWebsiteRow" style="display:none;"><span class="lbl">Website</span><a id="profWebsiteBio" href="#" target="_blank" rel="noopener noreferrer"></a></div>
-                <div class="profile-bio-meta" id="profLud16Row" style="display:none;"><span class="lbl">Lightning</span><span class="val" id="profLud16Bio"></span></div>
-                <div class="profile-bio-meta" id="profTwitterRow" style="display:none;"><span class="lbl">Twitter</span><a id="profTwitterBio" href="#" target="_blank" rel="noopener noreferrer"></a></div>
-                <div class="profile-bio-meta" id="profGithubRow" style="display:none;"><span class="lbl">GitHub</span><a id="profGithubBio" href="#" target="_blank" rel="noopener noreferrer"></a></div>
+                <div class="profile-bio clamped" id="profBio">No bio yet.</div>
+                <button class="profile-show-more" id="profBioToggle" style="display:none;" onclick="toggleProfileBio()">Show more</button>
+                <div class="profile-bio-links profile-bio-links-main" id="profBioLinksMain">
+                  <div class="profile-bio-meta" id="profTwitterRow" style="display:none;"><span class="lbl">Twitter</span><a id="profTwitterBio" href="#" target="_blank" rel="noopener noreferrer"></a></div>
+                  <div class="profile-bio-meta" id="profGithubRow" style="display:none;"><span class="lbl">GitHub</span><a id="profGithubBio" href="#" target="_blank" rel="noopener noreferrer"></a></div>
+                </div>
+                <div class="profile-bio-links profile-bio-links-bottom" id="profBioLinksBottom">
+                  <div class="profile-bio-meta" id="profWebsiteRow" style="display:none;"><span class="lbl">Website</span><a id="profWebsiteBio" href="#" target="_blank" rel="noopener noreferrer"></a></div>
+                  <div class="profile-bio-meta" id="profLud16Row" style="display:none;"><span class="lbl">Lightning</span><span class="val" id="profLud16Bio"></span></div>
+                </div>
+                <div class="profile-since" id="profNostrSince" style="display:none"></div>
               </div>
-              <div class="profile-since" id="profNostrSince" style="display:none"></div>
-            </div>
             <!-- Badges panel: shown only when badges are present -->
             <div class="profile-badges-panel" id="profileBadgesPanel" style="display:none;">
               <div class="profile-badges-title">&#127942; Badges</div>
@@ -796,10 +843,12 @@
             <div class="profile-compose-av" id="profileComposeAv">U</div>
             <span class="profile-compose-label">Share a note</span>
           </div>
-          <textarea class="profile-compose-textarea" id="profileComposeText" placeholder="What's on your mind?" maxlength="4096" oninput="profileComposeInput(this)"></textarea>
-          <div class="profile-compose-footer">
+          <div class="profile-compose-toolbar">
+            <button class="profile-compose-upload-btn" id="profileComposeUploadBtn" onclick="openComposeUploadModal()">Upload</button>
+            <span class="profile-compose-chars" id="profileComposeChars">4096</span>
             <button class="profile-compose-btn" id="profileComposeBtn" onclick="publishProfileNote()">Post Note</button>
           </div>
+          <textarea class="profile-compose-textarea" id="profileComposeText" placeholder="What's on your mind?" maxlength="4096" oninput="profileComposeInput(this)"></textarea>
         </div>
 
         <div class="profile-card" id="profileLiveWrap" style="display:none;">

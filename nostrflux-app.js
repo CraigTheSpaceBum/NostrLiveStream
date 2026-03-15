@@ -28,6 +28,7 @@
   const NIP05_LOOKUP_MISS_CACHE_TTL_MS = 1000 * 60 * 3;
   const NIP05_LOOKUP_ERROR_CACHE_TTL_MS = 1000 * 45;
   const NIP05_UNVERIFIED_CACHE_TTL_MS = 1000 * 60 * 2;
+  const NOSTR_BUILD_NIP96_DISCOVERY_URL = 'https://nostr.build/.well-known/nostr/nip96.json';
   const LIVE_STREAMS_CACHE_STORAGE_KEY = 'nostrflux_live_streams_cache_v1';
   const LIVE_STREAMS_CACHE_TTL_MS = 1000 * 60 * 2;
   const LIVE_STREAMS_CACHE_MAX_ITEMS = 160;
@@ -44,6 +45,9 @@
     compactChat: false,
     animateZaps: true,
     theme: 'dark',
+    cacheQueryTtlSec: 12,
+    cacheWarmSec: 75,
+    cacheLiveFeedTtlSec: 120,
     lud16: '',
     website: '',
     banner: ''
@@ -135,6 +139,9 @@
     postReactionPublishPendingByNoteAndKey: new Set(),
     reactionPickerTarget: null,
     shareModalStreamAddress: '',
+    composeUploadSource: 'nostr_build',
+    composeUploadPending: false,
+    nip96DiscoveryByHost: new Map(),
     activeViewerAddress: '',
     activeHeroViewerAddress: '',
     goLiveSelectedAddress: '',
@@ -460,6 +467,37 @@
     return (v === 'light' || v === 'midnight' || v === 'dark') ? v : 'dark';
   }
 
+  function clampInt(value, min, max, fallback) {
+    const n = Number.parseInt(String(value == null ? '' : value), 10);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(min, n));
+  }
+
+  function sanitizeCacheSettings(input) {
+    const src = input || {};
+    return {
+      cacheQueryTtlSec: clampInt(src.cacheQueryTtlSec, 1, 600, DEFAULT_SETTINGS.cacheQueryTtlSec),
+      cacheWarmSec: clampInt(src.cacheWarmSec, 5, 7200, DEFAULT_SETTINGS.cacheWarmSec),
+      cacheLiveFeedTtlSec: clampInt(src.cacheLiveFeedTtlSec, 10, 1800, DEFAULT_SETTINGS.cacheLiveFeedTtlSec)
+    };
+  }
+
+  function getCacheQueryTtlMs() {
+    const safe = sanitizeCacheSettings(state.settings);
+    return safe.cacheQueryTtlSec * 1000;
+  }
+
+  function getCacheWarmMs() {
+    const safe = sanitizeCacheSettings(state.settings);
+    const ttlMs = safe.cacheQueryTtlSec * 1000;
+    return Math.max(ttlMs, safe.cacheWarmSec * 1000);
+  }
+
+  function getLiveFeedCacheTtlMs() {
+    const safe = sanitizeCacheSettings(state.settings);
+    return safe.cacheLiveFeedTtlSec * 1000;
+  }
+
   function loadSettingsFromStorage() {
     let saved = {};
     try {
@@ -476,6 +514,7 @@
     merged.relays = [...new Set(merged.relays.map((r) => (r || '').trim()).filter((r) => /^wss:\/\//i.test(r)))];
     if (!merged.relays.length) merged.relays = [...DEFAULT_RELAYS];
     merged.theme = normalizeThemeSetting(merged.theme);
+    Object.assign(merged, sanitizeCacheSettings(merged));
 
     state.settings = merged;
     state.relays = [...merged.relays];
@@ -516,7 +555,7 @@
       const parsed = raw ? JSON.parse(raw) : null;
       const savedAt = Number(parsed && parsed.savedAt ? parsed.savedAt : 0);
       const age = Date.now() - savedAt;
-      if (!savedAt || age > LIVE_STREAMS_CACHE_TTL_MS) return;
+      if (!savedAt || age > getLiveFeedCacheTtlMs()) return;
       const items = Array.isArray(parsed && parsed.items) ? parsed.items : [];
       items.forEach((item) => {
         const stream = cloneCachedStream(item);
@@ -780,6 +819,13 @@
 
     const themeSelect = qs('#settingsThemeSelect');
     if (themeSelect) themeSelect.value = normalizeThemeSetting(state.settings.theme);
+    const cacheQueryInput = qs('#settingsCacheQueryTtlSec');
+    const cacheWarmInput = qs('#settingsCacheWarmSec');
+    const cacheLiveInput = qs('#settingsCacheLiveFeedTtlSec');
+    const safeCache = sanitizeCacheSettings(state.settings);
+    if (cacheQueryInput) cacheQueryInput.value = String(safeCache.cacheQueryTtlSec);
+    if (cacheWarmInput) cacheWarmInput.value = String(safeCache.cacheWarmSec);
+    if (cacheLiveInput) cacheLiveInput.value = String(safeCache.cacheLiveFeedTtlSec);
   }
 
   function collectSettingsFromModal() {
@@ -787,6 +833,14 @@
     const web = qs('#settingsWebsiteInput');
     const banner = qs('#settingsBannerInput');
     const theme = qs('#settingsThemeSelect');
+    const cacheQueryInput = qs('#settingsCacheQueryTtlSec');
+    const cacheWarmInput = qs('#settingsCacheWarmSec');
+    const cacheLiveInput = qs('#settingsCacheLiveFeedTtlSec');
+    const safeCache = sanitizeCacheSettings({
+      cacheQueryTtlSec: cacheQueryInput && cacheQueryInput.value,
+      cacheWarmSec: cacheWarmInput && cacheWarmInput.value,
+      cacheLiveFeedTtlSec: cacheLiveInput && cacheLiveInput.value
+    });
 
     return {
       ...state.settings,
@@ -798,6 +852,9 @@
       compactChat: isToggleOn('setCompactToggle'),
       animateZaps: isToggleOn('setAnimateToggle'),
       theme: normalizeThemeSetting((theme && theme.value) || state.settings.theme),
+      cacheQueryTtlSec: safeCache.cacheQueryTtlSec,
+      cacheWarmSec: safeCache.cacheWarmSec,
+      cacheLiveFeedTtlSec: safeCache.cacheLiveFeedTtlSec,
       lud16: (lud16 && lud16.value.trim()) || '',
       website: (web && web.value.trim()) || '',
       banner: (banner && banner.value.trim()) || ''
@@ -833,10 +890,14 @@
   }
 
   function applySettings(newSettings, opts = { reconnect: false }) {
+    const safeCache = sanitizeCacheSettings(newSettings);
     state.settings = {
       ...newSettings,
       relays: [...newSettings.relays],
-      theme: normalizeThemeSetting(newSettings.theme)
+      theme: normalizeThemeSetting(newSettings.theme),
+      cacheQueryTtlSec: safeCache.cacheQueryTtlSec,
+      cacheWarmSec: safeCache.cacheWarmSec,
+      cacheLiveFeedTtlSec: safeCache.cacheLiveFeedTtlSec
     };
     state.relays = [...state.settings.relays];
     persistSettings();
@@ -1044,8 +1105,8 @@
   async function fetchEventsCached(filters, opts = {}) {
     const scope = String(opts.scope || 'query');
     const cacheKey = String(opts.cacheKey || cacheKeyForFilters(filters, scope));
-    const ttlMs = Math.max(0, Number(opts.ttlMs || ONE_SHOT_CACHE_DEFAULT_TTL_MS));
-    const warmMs = Math.max(ttlMs, Number(opts.warmMs || ONE_SHOT_CACHE_DEFAULT_WARM_MS));
+    const ttlMs = Math.max(0, Number(opts.ttlMs || getCacheQueryTtlMs() || ONE_SHOT_CACHE_DEFAULT_TTL_MS));
+    const warmMs = Math.max(ttlMs, Number(opts.warmMs || getCacheWarmMs() || ONE_SHOT_CACHE_DEFAULT_WARM_MS));
     const allowStale = opts.allowStale !== false;
     const force = !!opts.force;
 
@@ -1066,6 +1127,140 @@
     } catch (_) {
       return cached ? (cached.events || []).slice() : [];
     }
+  }
+
+  function utf8ToBase64(input) {
+    const bytes = new TextEncoder().encode(String(input || ''));
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode.apply(null, Array.from(chunk));
+    }
+    return btoa(binary);
+  }
+
+  async function sha256HexFromArrayBuffer(buffer) {
+    const digest = await crypto.subtle.digest('SHA-256', buffer);
+    return bytesToHex(new Uint8Array(digest));
+  }
+
+  async function discoverNip96Provider(discoveryUrl = NOSTR_BUILD_NIP96_DISCOVERY_URL) {
+    const url = String(discoveryUrl || '').trim();
+    if (!isLikelyUrl(url)) throw new Error('Invalid NIP-96 discovery URL.');
+    const now = Date.now();
+    const cached = state.nip96DiscoveryByHost.get(url);
+    if (cached && (now - Number(cached.fetchedAt || 0)) < 1000 * 60 * 10) return cached;
+
+    const resp = await fetch(url, { cache: 'no-store' });
+    if (!resp.ok) throw new Error(`NIP-96 discovery failed (${resp.status}).`);
+    const data = await resp.json().catch(() => ({}));
+    const apiUrl = String(data.api_url || data.upload_url || '').trim();
+    if (!isLikelyUrl(apiUrl)) throw new Error('NIP-96 discovery did not return api_url.');
+    const provider = {
+      discoveryUrl: url,
+      apiUrl,
+      supportsNip98: data && data.plans ? true : true,
+      fetchedAt: now
+    };
+    state.nip96DiscoveryByHost.set(url, provider);
+    return provider;
+  }
+
+  function extractNip96UploadedUrl(data) {
+    if (!data || typeof data !== 'object') return '';
+    if (typeof data.url === 'string' && isLikelyUrl(data.url)) return data.url.trim();
+    if (typeof data.download_url === 'string' && isLikelyUrl(data.download_url)) return data.download_url.trim();
+    if (Array.isArray(data.files) && data.files.length) {
+      const fromFiles = data.files
+        .map((f) => (f && (f.url || f.download_url || f.source_url || '')) || '')
+        .find((v) => isLikelyUrl(v));
+      if (fromFiles) return String(fromFiles).trim();
+    }
+    const nip94 = data.nip94_event;
+    if (nip94 && Array.isArray(nip94.tags)) {
+      const tag = nip94.tags.find((t) => Array.isArray(t) && String(t[0] || '').toLowerCase() === 'url' && isLikelyUrl(t[1]));
+      if (tag && tag[1]) return String(tag[1]).trim();
+      const altTag = nip94.tags.find((t) => Array.isArray(t) && String(t[0] || '').toLowerCase() === 'x' && isLikelyUrl(t[1]));
+      if (altTag && altTag[1]) return String(altTag[1]).trim();
+    }
+    return '';
+  }
+
+  function setComposeUploadStatus(message, mode = 'info') {
+    const statusEl = qs('#composeUploadStatus');
+    if (!statusEl) return;
+    statusEl.textContent = String(message || '').trim();
+    statusEl.dataset.mode = mode;
+    const palette = {
+      info: 'var(--text2)',
+      success: 'var(--green)',
+      error: 'var(--live)'
+    };
+    statusEl.style.color = palette[mode] || palette.info;
+  }
+
+  function appendTextToProfileCompose(textToAppend) {
+    const textarea = qs('#profileComposeText');
+    if (!textarea) return false;
+    const val = String(textToAppend || '').trim();
+    if (!val) return false;
+    const current = String(textarea.value || '');
+    const joiner = current && !current.endsWith('\n') ? '\n' : '';
+    const next = `${current}${joiner}${val}`;
+    if (next.length > 4096) {
+      alert('That upload URL would exceed the 4096 character note limit.');
+      return false;
+    }
+    textarea.value = next;
+    if (typeof window.profileComposeInput === 'function') window.profileComposeInput(textarea);
+    try { textarea.focus(); } catch (_) {}
+    return true;
+  }
+
+  async function buildNip98AuthorizationHeader(url, method, payloadHashHex = '') {
+    const cleanUrl = String(url || '').trim();
+    const cleanMethod = String(method || 'POST').trim().toUpperCase();
+    if (!cleanUrl || !isLikelyUrl(cleanUrl)) throw new Error('Invalid upload URL for NIP-98 auth.');
+    if (!state.user) throw new Error('Please login to sign NIP-98 auth.');
+
+    const tags = [
+      ['u', cleanUrl],
+      ['method', cleanMethod]
+    ];
+    if (/^[0-9a-f]{64}$/i.test(payloadHashHex || '')) {
+      tags.push(['payload', String(payloadHashHex).toLowerCase()]);
+    }
+    const authEvent = await signEvent(27235, '', tags, { createdAt: Math.floor(Date.now() / 1000) });
+    return `Nostr ${utf8ToBase64(JSON.stringify(authEvent))}`;
+  }
+
+  async function uploadFileToNostrBuildNip96(file) {
+    if (!file) throw new Error('No file selected.');
+    if (!state.user) throw new Error('Please login first.');
+
+    const provider = await discoverNip96Provider(NOSTR_BUILD_NIP96_DISCOVERY_URL);
+    const formData = new FormData();
+    formData.append('file', file, file.name || 'upload.bin');
+
+    const authorization = await buildNip98AuthorizationHeader(provider.apiUrl, 'POST');
+
+    const resp = await fetch(provider.apiUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: authorization
+      },
+      body: formData
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const message = (data && (data.message || data.error || data.status)) || `Upload failed (${resp.status})`;
+      throw new Error(String(message));
+    }
+
+    const mediaUrl = extractNip96UploadedUrl(data);
+    if (!mediaUrl) throw new Error('Upload succeeded but no media URL was returned.');
+    return { url: mediaUrl, response: data };
   }
 
   function parseLiveEvent(ev) {
@@ -1718,17 +1913,17 @@
     );
   }
 
-  async function signAndPublish(kind, content, tags) {
+  async function signEvent(kind, content, tags, opts = {}) {
     if (!state.user) {
-      throw new Error('You are in read-only mode. Login to publish.');
+      throw new Error('You are in read-only mode. Login to sign events.');
     }
 
-    const createdAt = Math.floor(Date.now() / 1000);
+    const createdAt = Number(opts.createdAt || Math.floor(Date.now() / 1000));
     const unsigned = {
       kind,
       created_at: createdAt,
-      tags,
-      content
+      tags: Array.isArray(tags) ? tags : [],
+      content: String(content || '')
     };
 
     let signed;
@@ -1760,6 +1955,11 @@
       throw new Error('You are in read-only mode. Login with extension or nsec key first.');
     }
 
+    return signed;
+  }
+
+  async function signAndPublish(kind, content, tags) {
+    const signed = await signEvent(kind, content, tags);
     const sent = state.pool.publish(signed);
     if (sent === 0) throw new Error('No relay connections are currently open.');
     return signed;
@@ -3091,8 +3291,6 @@
       {
         scope: 'own-stream-boost',
         cacheKey: `own-stream-boost:${own}:${stream.address}:${stream.id}`,
-        ttlMs: 6000,
-        warmMs: 60000,
         timeoutMs: 1800,
         maxEvents: 500
       }
@@ -3361,8 +3559,6 @@
       {
         scope: 'event-by-id',
         cacheKey: `event-by-id:${eventId}`,
-        ttlMs: 1000 * 60 * 8,
-        warmMs: 1000 * 60 * 45,
         timeoutMs: 3000,
         maxEvents: 4
       }
@@ -3956,8 +4152,6 @@
       {
         scope: 'own-stream-reaction',
         cacheKey: `own-stream-reaction:${own}:${stream.address}:${stream.id}:${wantedKey}`,
-        ttlMs: 5000,
-        warmMs: 45000,
         timeoutMs: 2200,
         maxEvents: 420
       }
@@ -4006,8 +4200,6 @@
       {
         scope: 'own-chat-like',
         cacheKey: `own-chat-like:${own}:${stream.address}:${messageId}`,
-        ttlMs: 5000,
-        warmMs: 45000,
         timeoutMs: 2200,
         maxEvents: 320
       }
@@ -4056,8 +4248,6 @@
       {
         scope: 'own-post-reaction',
         cacheKey: `own-post-reaction:${own}:${noteId}:${wantedKey}`,
-        ttlMs: 5000,
-        warmMs: 45000,
         timeoutMs: 2200,
         maxEvents: 320
       }
@@ -4381,8 +4571,6 @@
       {
         scope: 'profile-by-pubkey',
         cacheKey: `profile-by-pubkey:${pubkey}`,
-        ttlMs: 1000 * 60 * 2,
-        warmMs: 1000 * 60 * 20,
         timeoutMs: 2200,
         maxEvents: 10
       }
@@ -5897,12 +6085,13 @@
     if (website && !isLikelyUrl(website) && /^[a-z0-9.-]+\.[a-z]{2,}/i.test(website)) {
       website = `https://${website}`;
     }
-    if (website && isLikelyUrl(website)) {
+    const websiteVisible = !!(website && isLikelyUrl(website));
+    if (websiteVisible) {
       if (websiteBio) {
         websiteBio.href = website;
         websiteBio.textContent = website;
       }
-      if (websiteRow) websiteRow.style.display = 'inline-flex';
+      if (websiteRow) websiteRow.style.display = 'flex';
     } else if (websiteRow) {
       websiteRow.style.display = 'none';
     }
@@ -5910,9 +6099,10 @@
     const lud16Row = qs('#profLud16Row');
     const lud16Bio = qs('#profLud16Bio');
     const lud16 = (p.lud16 || '').trim();
-    if (lud16) {
+    const lud16Visible = !!lud16;
+    if (lud16Visible) {
       if (lud16Bio) lud16Bio.textContent = lud16;
-      if (lud16Row) lud16Row.style.display = 'inline-flex';
+      if (lud16Row) lud16Row.style.display = 'flex';
     } else if (lud16Row) {
       lud16Row.style.display = 'none';
     }
@@ -5920,12 +6110,13 @@
     const twitterRow = qs('#profTwitterRow');
     const twitterBio = qs('#profTwitterBio');
     const tw = normalizeTwitterLink(p.twitter || '');
-    if (tw.url) {
+    const twitterVisible = !!tw.url;
+    if (twitterVisible) {
       if (twitterBio) {
         twitterBio.href = tw.url;
         twitterBio.textContent = tw.label || tw.url;
       }
-      if (twitterRow) twitterRow.style.display = 'inline-flex';
+      if (twitterRow) twitterRow.style.display = 'flex';
     } else if (twitterRow) {
       twitterRow.style.display = 'none';
     }
@@ -5933,15 +6124,21 @@
     const githubRow = qs('#profGithubRow');
     const githubBio = qs('#profGithubBio');
     const gh = normalizeGithubLink(p.github || '');
-    if (gh.url) {
+    const githubVisible = !!gh.url;
+    if (githubVisible) {
       if (githubBio) {
         githubBio.href = gh.url;
         githubBio.textContent = gh.label || gh.url;
       }
-      if (githubRow) githubRow.style.display = 'inline-flex';
+      if (githubRow) githubRow.style.display = 'flex';
     } else if (githubRow) {
       githubRow.style.display = 'none';
     }
+
+    const mainBioLinks = qs('#profBioLinksMain');
+    if (mainBioLinks) mainBioLinks.style.display = (twitterVisible || githubVisible) ? 'flex' : 'none';
+    const bottomBioLinks = qs('#profBioLinksBottom');
+    if (bottomBioLinks) bottomBioLinks.style.display = (websiteVisible || lud16Visible) ? 'flex' : 'none';
 
     const bannerImg = qs('#profBannerImg');
     if (bannerImg && p.banner && isLikelyUrl(p.banner)) {
@@ -6891,10 +7088,14 @@
         const lud16Row = qs('#profLud16Row');
         const twitterRow = qs('#profTwitterRow');
         const githubRow = qs('#profGithubRow');
+        const mainLinksWrap = qs('#profBioLinksMain');
+        const bottomLinksWrap = qs('#profBioLinksBottom');
         if (websiteRow) websiteRow.style.display = 'none';
         if (lud16Row) lud16Row.style.display = 'none';
         if (twitterRow) twitterRow.style.display = 'none';
         if (githubRow) githubRow.style.display = 'none';
+        if (mainLinksWrap) mainLinksWrap.style.display = 'none';
+        if (bottomLinksWrap) bottomLinksWrap.style.display = 'none';
         const bioToggle = qs('#profBioToggle');
         if (bioToggle) bioToggle.style.display = 'none';
         const nostrSince = qs('#profNostrSince');
@@ -7700,11 +7901,89 @@
     // ---- Compose / post note on own profile ----
     window.profileComposeInput = function (el) {
       const max = 4096;
-      const rem = max - (el.value || '').length;
+      const value = el && typeof el.value === 'string' ? el.value : '';
+      const rem = max - value.length;
       const chars = qs('#profileComposeChars');
       if (chars) {
         chars.textContent = `${rem}`;
         chars.style.color = rem < 50 ? 'var(--live)' : '';
+      }
+    };
+
+    window.openComposeUploadModal = function () {
+      if (!state.user) { window.openLogin(); return; }
+      const ov = qs('#composeUploadModal');
+      if (!ov) return;
+      state.composeUploadSource = 'nostr_build';
+      setComposeUploadStatus('Choose where to upload from.', 'info');
+      ov.classList.add('open');
+    };
+
+    window.closeComposeUploadModal = function (e) {
+      const ov = qs('#composeUploadModal');
+      if (!ov) return;
+      if (e && e.target !== ov) return;
+      ov.classList.remove('open');
+      const fileInput = qs('#composeUploadFileInput');
+      if (fileInput) fileInput.value = '';
+    };
+
+    window.promptComposeMediaUrl = function () {
+      const raw = window.prompt('Paste an image or video URL:');
+      const url = String(raw || '').trim();
+      if (!url) return;
+      if (!isLikelyUrl(url)) {
+        alert('Please paste a valid URL.');
+        return;
+      }
+      appendTextToProfileCompose(url);
+      setComposeUploadStatus('URL inserted into your note.', 'success');
+      setTimeout(() => {
+        const ov = qs('#composeUploadModal');
+        if (ov) ov.classList.remove('open');
+      }, 350);
+    };
+
+    window.selectComposeUploadSource = function (source) {
+      if (state.composeUploadPending) return;
+      const normalized = String(source || '').trim().toLowerCase();
+      state.composeUploadSource = normalized || 'nostr_build';
+      if (state.composeUploadSource === 'nostr_build') {
+        const fileInput = qs('#composeUploadFileInput');
+        if (!fileInput) return;
+        fileInput.value = '';
+        setComposeUploadStatus('Pick a photo or video file from your device.', 'info');
+        try { fileInput.click(); } catch (_) {}
+        return;
+      }
+      alert('Unsupported upload source.');
+    };
+
+    window.uploadComposeFile = async function (event) {
+      const input = event && event.target;
+      const file = input && input.files && input.files[0];
+      if (!file) return;
+      if (state.composeUploadPending) return;
+      if (!state.user) { window.openLogin(); return; }
+      state.composeUploadPending = true;
+      setComposeUploadStatus(`Uploading ${file.name}...`, 'info');
+
+      try {
+        if (state.composeUploadSource !== 'nostr_build') {
+          throw new Error('Unsupported upload source selected.');
+        }
+        const result = await uploadFileToNostrBuildNip96(file);
+        appendTextToProfileCompose(result.url);
+        setComposeUploadStatus('Upload complete. URL inserted into your note.', 'success');
+        setTimeout(() => {
+          const ov = qs('#composeUploadModal');
+          if (ov) ov.classList.remove('open');
+        }, 500);
+      } catch (err) {
+        setComposeUploadStatus(err && err.message ? err.message : 'Upload failed.', 'error');
+      } finally {
+        state.composeUploadPending = false;
+        if (input) input.value = '';
       }
     };
 
@@ -7991,6 +8270,9 @@
       state.postReactionPublishPendingByNoteAndKey = new Set();
       state.reactionPickerTarget = null;
       state.shareModalStreamAddress = '';
+      state.composeUploadSource = 'nostr_build';
+      state.composeUploadPending = false;
+      state.nip96DiscoveryByHost = new Map();
       state.goLiveSelectedAddress = '';
       state.goLiveHiddenEndedAddresses = new Set();
       if (state.profileStatusSubId && state.pool) {
@@ -8009,7 +8291,7 @@
         state.liveStreamCachePersistTimer = null;
       }
       window.closeAllDD();
-      ['goLiveModal','endModal','loginModal','settingsModal','faqModal','shareModal','reactionPickerModal'].forEach((id) => {
+      ['goLiveModal','endModal','loginModal','settingsModal','faqModal','shareModal','reactionPickerModal','composeUploadModal'].forEach((id) => {
         const el = qs('#' + id); if (el) el.classList.remove('open');
       });
       setUserUi();
