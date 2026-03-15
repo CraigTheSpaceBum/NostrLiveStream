@@ -29,6 +29,10 @@
   const NIP05_LOOKUP_ERROR_CACHE_TTL_MS = 1000 * 45;
   const NIP05_UNVERIFIED_CACHE_TTL_MS = 1000 * 60 * 2;
   const NOSTR_BUILD_NIP96_DISCOVERY_URL = 'https://nostr.build/.well-known/nostr/nip96.json';
+  const NOSTR_BUILD_NIP96_UPLOAD_FALLBACK_URLS = [
+    'https://nostr.build/api/v2/nip96/upload',
+    'https://nostr.build/api/v2/upload/files'
+  ];
   const LIVE_STREAMS_CACHE_STORAGE_KEY = 'nostrflux_live_streams_cache_v1';
   const LIVE_STREAMS_CACHE_TTL_MS = 1000 * 60 * 2;
   const LIVE_STREAMS_CACHE_MAX_ITEMS = 160;
@@ -137,6 +141,7 @@
     chatMessageEventsById: new Map(),
     chatLikePublishPendingByMessageId: new Set(),
     postReactionPublishPendingByNoteAndKey: new Set(),
+    postBoostPublishPendingByNoteId: new Set(),
     reactionPickerTarget: null,
     shareModalStreamAddress: '',
     composeUploadSource: 'nostr_build',
@@ -1218,6 +1223,20 @@
     return true;
   }
 
+  function buildNip96UploadTargets(provider) {
+    const out = [];
+    const seen = new Set();
+    const push = (candidate) => {
+      const clean = String(candidate || '').trim();
+      if (!isLikelyUrl(clean) || seen.has(clean)) return;
+      seen.add(clean);
+      out.push(clean);
+    };
+    push(provider && provider.apiUrl ? provider.apiUrl : '');
+    NOSTR_BUILD_NIP96_UPLOAD_FALLBACK_URLS.forEach(push);
+    return out;
+  }
+
   async function buildNip98AuthorizationHeader(url, method, payloadHashHex = '') {
     const cleanUrl = String(url || '').trim();
     const cleanMethod = String(method || 'POST').trim().toUpperCase();
@@ -1239,28 +1258,49 @@
     if (!file) throw new Error('No file selected.');
     if (!state.user) throw new Error('Please login first.');
 
-    const provider = await discoverNip96Provider(NOSTR_BUILD_NIP96_DISCOVERY_URL);
-    const formData = new FormData();
-    formData.append('file', file, file.name || 'upload.bin');
-
-    const authorization = await buildNip98AuthorizationHeader(provider.apiUrl, 'POST');
-
-    const resp = await fetch(provider.apiUrl, {
-      method: 'POST',
-      headers: {
-        Authorization: authorization
-      },
-      body: formData
-    });
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      const message = (data && (data.message || data.error || data.status)) || `Upload failed (${resp.status})`;
-      throw new Error(String(message));
+    let provider = null;
+    try {
+      provider = await discoverNip96Provider(NOSTR_BUILD_NIP96_DISCOVERY_URL);
+    } catch (_) {
+      // Continue with known fallback upload endpoints.
     }
 
-    const mediaUrl = extractNip96UploadedUrl(data);
-    if (!mediaUrl) throw new Error('Upload succeeded but no media URL was returned.');
-    return { url: mediaUrl, response: data };
+    const targets = buildNip96UploadTargets(provider);
+    if (!targets.length) throw new Error('No valid NIP-96 upload endpoint is configured.');
+
+    let lastError = null;
+    for (const targetUrl of targets) {
+      try {
+        const formData = new FormData();
+        formData.append('file', file, file.name || 'upload.bin');
+        const authorization = await buildNip98AuthorizationHeader(targetUrl, 'POST');
+
+        const resp = await fetch(targetUrl, {
+          method: 'POST',
+          headers: {
+            Authorization: authorization
+          },
+          body: formData
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          const message = (data && (data.message || data.error || data.status)) || `Upload failed (${resp.status})`;
+          throw new Error(String(message));
+        }
+
+        const mediaUrl = extractNip96UploadedUrl(data);
+        if (!mediaUrl) throw new Error('Upload succeeded but no media URL was returned.');
+        return { url: mediaUrl, response: data, endpoint: targetUrl };
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    const rawMessage = lastError && lastError.message ? String(lastError.message) : 'Upload failed.';
+    if (/failed to fetch/i.test(rawMessage)) {
+      throw new Error('Upload endpoint is temporarily unavailable. Please try again shortly or use Paste URL.');
+    }
+    throw new Error(rawMessage);
   }
 
   function parseLiveEvent(ev) {
@@ -3634,47 +3674,228 @@
     return card;
   }
 
-  // Main content renderer ? returns a DocumentFragment safe for appending to DOM
+  function safeHrefFromUrl(rawUrl) {
+    const clean = String(rawUrl || '').trim();
+    if (!clean) return '';
+    try {
+      const parsed = new URL(clean);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
+      return parsed.href;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function trimUrlTrailingPunctuation(rawUrl) {
+    return String(rawUrl || '').replace(/[)\],.;!?'"`>]+$/g, '');
+  }
+
+  function _appendNostrEntityToNode(parent, entity, rawToken, opts = {}) {
+    if (!parent || !entity) return;
+    const allowEventEmbeds = !!opts.allowEventEmbeds;
+
+    if (entity.startsWith('npub1') || entity.startsWith('nprofile1')) {
+      if (window.NostrTools && window.NostrTools.nip19) {
+        const decoded = _decodeNostrEntity(entity);
+        parent.appendChild(decoded ? _buildMentionPill(decoded.pubkey) : document.createTextNode(rawToken || `nostr:${entity}`));
+      } else {
+        const pill = document.createElement('span');
+        pill.className = 'nostr-mention-pill';
+        pill.textContent = '@' + entity.slice(0, 12) + '...';
+        parent.appendChild(pill);
+        ensureNostrTools().then(() => {
+          const decoded = _decodeNostrEntity(entity);
+          if (decoded && decoded.pubkey) {
+            pill.textContent = '@' + (profileFor(decoded.pubkey).name || shortHex(decoded.pubkey));
+            pill.onclick = (e) => { e.stopPropagation(); showProfileByPubkey(decoded.pubkey); };
+            fetchProfileIfNeeded(decoded.pubkey).then(() => {
+              pill.textContent = '@' + (profileFor(decoded.pubkey).name || shortHex(decoded.pubkey));
+            }).catch(() => {});
+          }
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    if (entity.startsWith('nevent1') || entity.startsWith('note1')) {
+      if (allowEventEmbeds) {
+        parent.appendChild(_buildNeventCard(entity));
+      } else {
+        const link = document.createElement('a');
+        link.href = `nostr:${entity}`;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.className = 'nostr-inline-link';
+        link.textContent = `nostr:${entity}`;
+        parent.appendChild(link);
+      }
+      return;
+    }
+
+    parent.appendChild(document.createTextNode(rawToken || `nostr:${entity}`));
+  }
+
+  function _appendInlineNostrMarkup(parent, text) {
+    if (!parent) return;
+    const raw = String(text || '');
+    if (!raw) return;
+
+    const TOKEN_RE = /(`[^`\n]+`)|(\*\*[^*\n]+?\*\*)|(~~[^~\n]+?~~)|(\*[^*\n]+?\*)|(nostr:(npub1[a-zA-Z0-9]+|nprofile1[a-zA-Z0-9]+|nevent1[a-zA-Z0-9]+|note1[a-zA-Z0-9]+))|(https?:\/\/[^\s<]+)/g;
+    let cursor = 0;
+    let match;
+    while ((match = TOKEN_RE.exec(raw)) !== null) {
+      if (match.index > cursor) {
+        parent.appendChild(document.createTextNode(raw.slice(cursor, match.index)));
+      }
+
+      const token = match[0];
+      if (match[1]) {
+        const code = document.createElement('code');
+        code.className = 'nostr-inline-code';
+        code.textContent = token.slice(1, -1);
+        parent.appendChild(code);
+      } else if (match[2]) {
+        const strong = document.createElement('strong');
+        strong.className = 'nostr-md-strong';
+        _appendInlineNostrMarkup(strong, token.slice(2, -2));
+        parent.appendChild(strong);
+      } else if (match[3]) {
+        const strike = document.createElement('s');
+        strike.className = 'nostr-md-strike';
+        _appendInlineNostrMarkup(strike, token.slice(2, -2));
+        parent.appendChild(strike);
+      } else if (match[4]) {
+        const italic = document.createElement('em');
+        italic.className = 'nostr-md-italic';
+        _appendInlineNostrMarkup(italic, token.slice(1, -1));
+        parent.appendChild(italic);
+      } else if (match[5]) {
+        _appendNostrEntityToNode(parent, match[6], match[5], { allowEventEmbeds: false });
+      } else if (match[7]) {
+        const cleanUrl = trimUrlTrailingPunctuation(match[7]);
+        const href = safeHrefFromUrl(cleanUrl);
+        if (href) {
+          const a = document.createElement('a');
+          a.href = href;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.className = 'nostr-inline-link';
+          a.textContent = cleanUrl;
+          parent.appendChild(a);
+          const trailing = token.slice(cleanUrl.length);
+          if (trailing) parent.appendChild(document.createTextNode(trailing));
+        } else {
+          parent.appendChild(document.createTextNode(token));
+        }
+      } else {
+        parent.appendChild(document.createTextNode(token));
+      }
+      cursor = TOKEN_RE.lastIndex;
+    }
+
+    if (cursor < raw.length) {
+      parent.appendChild(document.createTextNode(raw.slice(cursor)));
+    }
+  }
+
+  // Main content renderer returns a DocumentFragment safe for appending to DOM.
   function renderNostrContent(text) {
     const frag = document.createDocumentFragment();
-    if (!text) return frag;
+    const source = String(text || '').replace(/\r\n?/g, '\n');
+    if (!source.trim()) return frag;
 
-    // NIP-21: nostr:<bech32entity>
-    const RE = /nostr:(npub1[a-zA-Z0-9]+|nprofile1[a-zA-Z0-9]+|nevent1[a-zA-Z0-9]+|note1[a-zA-Z0-9]+)/g;
-    let last = 0;
-    let m;
-    while ((m = RE.exec(text)) !== null) {
-      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
-      const entity = m[1];
-      if (entity.startsWith('npub1') || entity.startsWith('nprofile1')) {
-        // Decode immediately if NostrTools ready, else async placeholder
-        if (window.NostrTools && window.NostrTools.nip19) {
-          const decoded = _decodeNostrEntity(entity);
-          frag.appendChild(decoded ? _buildMentionPill(decoded.pubkey) : document.createTextNode(m[0]));
-        } else {
-          const pill = document.createElement('span');
-          pill.className = 'nostr-mention-pill';
-          pill.textContent = '@' + entity.slice(0, 12) + '...';
-          frag.appendChild(pill);
-          ensureNostrTools().then(() => {
-            const decoded = _decodeNostrEntity(entity);
-            if (decoded && decoded.pubkey) {
-              pill.textContent = '@' + (profileFor(decoded.pubkey).name || shortHex(decoded.pubkey));
-              pill.onclick = (e) => { e.stopPropagation(); showProfileByPubkey(decoded.pubkey); };
-              fetchProfileIfNeeded(decoded.pubkey).then(() => {
-                pill.textContent = '@' + (profileFor(decoded.pubkey).name || shortHex(decoded.pubkey));
-              }).catch(() => {});
-            }
-          }).catch(() => {});
-        }
-      } else if (entity.startsWith('nevent1') || entity.startsWith('note1')) {
-        frag.appendChild(_buildNeventCard(entity));
-      } else {
-        frag.appendChild(document.createTextNode(m[0]));
+    const lines = source.split('\n');
+    let activeList = null;
+    let paragraphLines = [];
+
+    const closeList = () => { activeList = null; };
+    const flushParagraph = () => {
+      if (!paragraphLines.length) return;
+      const p = document.createElement('p');
+      p.className = 'nostr-md-p';
+      paragraphLines.forEach((line, idx) => {
+        if (idx) p.appendChild(document.createElement('br'));
+        _appendInlineNostrMarkup(p, line);
+      });
+      frag.appendChild(p);
+      paragraphLines = [];
+    };
+    const ensureList = (kind) => {
+      if (!activeList || activeList.kind !== kind) {
+        const list = document.createElement(kind);
+        list.className = kind === 'ul' ? 'nostr-md-ul' : 'nostr-md-ol';
+        frag.appendChild(list);
+        activeList = { kind, el: list };
       }
-      last = RE.lastIndex;
-    }
-    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+      return activeList.el;
+    };
+
+    lines.forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        flushParagraph();
+        closeList();
+        return;
+      }
+
+      const standaloneEntity = trimmed.match(/^nostr:(npub1[a-zA-Z0-9]+|nprofile1[a-zA-Z0-9]+|nevent1[a-zA-Z0-9]+|note1[a-zA-Z0-9]+)$/);
+      if (standaloneEntity && (standaloneEntity[1].startsWith('nevent1') || standaloneEntity[1].startsWith('note1'))) {
+        flushParagraph();
+        closeList();
+        _appendNostrEntityToNode(frag, standaloneEntity[1], standaloneEntity[0], { allowEventEmbeds: true });
+        return;
+      }
+
+      const heading = line.match(/^\s*(#{1,3})\s+(.*)$/);
+      if (heading) {
+        flushParagraph();
+        closeList();
+        const level = heading[1].length;
+        const h = document.createElement(`h${level}`);
+        h.className = `nostr-md-h${level}`;
+        _appendInlineNostrMarkup(h, heading[2]);
+        frag.appendChild(h);
+        return;
+      }
+
+      const quote = line.match(/^\s*>\s?(.*)$/);
+      if (quote) {
+        flushParagraph();
+        closeList();
+        const blockquote = document.createElement('blockquote');
+        blockquote.className = 'nostr-md-blockquote';
+        _appendInlineNostrMarkup(blockquote, quote[1]);
+        frag.appendChild(blockquote);
+        return;
+      }
+
+      const ul = line.match(/^\s*-\s+(.*)$/);
+      if (ul) {
+        flushParagraph();
+        const list = ensureList('ul');
+        const li = document.createElement('li');
+        li.className = 'nostr-md-li';
+        _appendInlineNostrMarkup(li, ul[1]);
+        list.appendChild(li);
+        return;
+      }
+
+      const ol = line.match(/^\s*(\d+)\.\s+(.*)$/);
+      if (ol) {
+        flushParagraph();
+        const list = ensureList('ol');
+        const li = document.createElement('li');
+        li.className = 'nostr-md-li';
+        _appendInlineNostrMarkup(li, ol[2]);
+        list.appendChild(li);
+        return;
+      }
+
+      closeList();
+      paragraphLines.push(line);
+    });
+
+    flushParagraph();
     return frag;
   }
 
@@ -4272,6 +4493,75 @@
       }
     });
     const active = reactions
+      .filter((ev) => !deletedIds.has(ev.id))
+      .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
+    return active.length ? active[0].id : '';
+  }
+
+  function findOwnPostBoostIdFromProfileMap(noteId, profilePubkey) {
+    if (!state.user || !noteId || !profilePubkey) return '';
+    const own = normalizePubkeyHex(state.user.pubkey);
+    if (!own) return '';
+    const map = state.profileNotesByPubkey.get(profilePubkey);
+    if (!map || !map.size) return '';
+
+    const deletedIds = new Set();
+    map.forEach((ev) => {
+      if (!ev || ev.kind !== KIND_DELETION) return;
+      if (normalizePubkeyHex(ev.pubkey) !== own) return;
+      allTagValues(ev.tags, 'e').forEach((id) => {
+        if (/^[0-9a-f]{64}$/i.test(id)) deletedIds.add(id);
+      });
+    });
+
+    let newest = null;
+    map.forEach((ev) => {
+      if (!ev || ev.kind !== 6 || normalizePubkeyHex(ev.pubkey) !== own) return;
+      if (deletedIds.has(ev.id)) return;
+      const refs = allTagValues(ev.tags, 'e');
+      if (!refs.includes(noteId)) return;
+      if (!newest || Number(ev.created_at || 0) >= Number(newest.created_at || 0)) {
+        newest = ev;
+      }
+    });
+    return newest && newest.id ? newest.id : '';
+  }
+
+  async function findOwnPostBoostId(noteId) {
+    if (!state.user || !state.pool || !noteId) return '';
+    const own = normalizePubkeyHex(state.user.pubkey);
+    if (!own) return '';
+    const filters = [
+      { kinds: [6], authors: [own], '#e': [noteId], limit: 100, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 90 },
+      { kinds: [KIND_DELETION], authors: [own], limit: 120, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 90 }
+    ];
+    const events = await fetchEventsCached(
+      filters,
+      {
+        scope: 'own-post-boost',
+        cacheKey: `own-post-boost:${own}:${noteId}`,
+        timeoutMs: 2200,
+        maxEvents: 320
+      }
+    );
+
+    const reposts = [];
+    const deletedIds = new Set();
+    events.forEach((ev) => {
+      if (!ev) return;
+      if (ev.kind === 6) {
+        const eTag = firstTagValue(ev.tags, 'e');
+        if (eTag && eTag !== noteId) return;
+        reposts.push(ev);
+        return;
+      }
+      if (ev.kind === KIND_DELETION) {
+        allTagValues(ev.tags, 'e').forEach((id) => {
+          if (/^[0-9a-f]{64}$/i.test(id)) deletedIds.add(id);
+        });
+      }
+    });
+    const active = reposts
       .filter((ev) => !deletedIds.has(ev.id))
       .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
     return active.length ? active[0].id : '';
@@ -4925,17 +5215,55 @@
 
   function buildProfilePostAggregates(pubkey, posts) {
     const map = state.profileNotesByPubkey.get(pubkey) || new Map();
-    const postIdSet = new Set(posts.map((p) => p.id));
+    const trackedPostIds = new Set();
+    const targetIdByDisplayPostId = new Map();
+    const targetPubkeyByDisplayPostId = new Map();
     const statsByPost = new Map();
     const commentsByPost = new Map();
     const likePubkeysByPost = new Map();
+    const boostPubkeysByPost = new Map();
     const emojiByPost = new Map();
 
+    const resolveRepostTarget = (post) => {
+      let targetId = post.id;
+      let targetPubkey = post.pubkey;
+
+      const parsed = parseJsonSafe(post.content || '');
+      if (parsed && /^[0-9a-f]{64}$/i.test(parsed.id || '')) targetId = parsed.id;
+      const refs = getTagValues(post, 'e');
+      if (/^[0-9a-f]{64}$/i.test(refs[refs.length - 1] || '')) targetId = refs[refs.length - 1];
+
+      if (parsed && /^[0-9a-f]{64}$/i.test(parsed.pubkey || '')) targetPubkey = parsed.pubkey;
+      const pRefs = getTagValues(post, 'p');
+      if (/^[0-9a-f]{64}$/i.test(pRefs[pRefs.length - 1] || '')) targetPubkey = pRefs[pRefs.length - 1];
+
+      return { targetId, targetPubkey };
+    };
+
     posts.forEach((post) => {
-      statsByPost.set(post.id, { likes: 0, emoji: 0, boosts: 0, zaps: 0 });
-      commentsByPost.set(post.id, []);
-      likePubkeysByPost.set(post.id, new Set());
-      emojiByPost.set(post.id, new Map());
+      trackedPostIds.add(post.id);
+      if (post.kind === 6) {
+        const target = resolveRepostTarget(post);
+        if (target && /^[0-9a-f]{64}$/i.test(target.targetId || '')) {
+          trackedPostIds.add(target.targetId);
+          targetIdByDisplayPostId.set(post.id, target.targetId);
+          targetPubkeyByDisplayPostId.set(post.id, target.targetPubkey || post.pubkey);
+        } else {
+          targetIdByDisplayPostId.set(post.id, post.id);
+          targetPubkeyByDisplayPostId.set(post.id, post.pubkey);
+        }
+      } else {
+        targetIdByDisplayPostId.set(post.id, post.id);
+        targetPubkeyByDisplayPostId.set(post.id, post.pubkey);
+      }
+    });
+
+    trackedPostIds.forEach((postId) => {
+      statsByPost.set(postId, { likes: 0, emoji: 0, boosts: 0, zaps: 0 });
+      commentsByPost.set(postId, []);
+      likePubkeysByPost.set(postId, new Set());
+      boostPubkeysByPost.set(postId, new Set());
+      emojiByPost.set(postId, new Map());
     });
 
     const deletedIds = new Set();
@@ -4949,7 +5277,7 @@
     map.forEach((ev) => {
       if (!ev || !ev.id) return;
       if (deletedIds.has(ev.id)) return;
-      const ref = pickReferencedPostId(ev, postIdSet);
+      const ref = pickReferencedPostId(ev, trackedPostIds);
       if (!ref) return;
 
       const stats = statsByPost.get(ref);
@@ -4957,6 +5285,7 @@
 
       if (ev.kind === 6) {
         stats.boosts += 1;
+        boostPubkeysByPost.get(ref).add(ev.pubkey);
         return;
       }
 
@@ -4998,18 +5327,26 @@
       list.sort((a, b) => (a.created_at || 0) - (b.created_at || 0));
     });
 
-    posts.forEach((post) => {
-      const stats = statsByPost.get(post.id);
+    trackedPostIds.forEach((postId) => {
+      const stats = statsByPost.get(postId);
       if (!stats) return;
-      const likeSet = likePubkeysByPost.get(post.id) || new Set();
+      const likeSet = likePubkeysByPost.get(postId) || new Set();
       stats.likes = likeSet.size;
-      const emojiMap = emojiByPost.get(post.id) || new Map();
+      const emojiMap = emojiByPost.get(postId) || new Map();
       let emojiTotal = 0;
       emojiMap.forEach((entry) => { emojiTotal += entry.pubkeys.size; });
       stats.emoji = emojiTotal;
     });
 
-    return { statsByPost, commentsByPost, likePubkeysByPost, emojiByPost };
+    return {
+      statsByPost,
+      commentsByPost,
+      likePubkeysByPost,
+      boostPubkeysByPost,
+      emojiByPost,
+      targetIdByDisplayPostId,
+      targetPubkeyByDisplayPostId
+    };
   }
 
   function stripMediaUrlsFromText(text, mediaUrls) {
@@ -5155,7 +5492,7 @@
           <span class="pfs pfs-comments"><strong>0</strong> Comments</span>
           <button class="pfs pfs-btn profile-post-like-btn" type="button"><strong>0</strong> Likes</button>
           <span class="pfs pfs-zaps"><strong>0</strong> Zaps</span>
-          <span class="pfs pfs-boosts"><strong>0</strong> Boosts</span>
+          <button class="pfs pfs-btn profile-post-boost-btn" type="button"><strong>0</strong> Boosts</button>
           <button class="pfs pfs-btn pfs-plus profile-post-emoji-btn" type="button" title="React with custom emoji">+</button>
         </div>
         <div class="profile-feed-emoji-bar"></div>
@@ -5169,6 +5506,14 @@
       const displayProfile = (isRepost && originalProfile) ? originalProfile : profile;
       const displayNote = (isRepost && originalNote) ? originalNote : note;
       const displayPubkey = (isRepost && originalPubkey) ? originalPubkey : note.pubkey;
+      const targetPostId =
+        (aggregates && aggregates.targetIdByDisplayPostId && aggregates.targetIdByDisplayPostId.get(note.id)) ||
+        displayNote.id ||
+        note.id;
+      const targetPostPubkey =
+        (aggregates && aggregates.targetPubkeyByDisplayPostId && aggregates.targetPubkeyByDisplayPostId.get(note.id)) ||
+        displayPubkey ||
+        note.pubkey;
 
       const avEl = qs('.profile-feed-av', item);
       setAvatarEl(avEl, displayProfile.picture || '', pickAvatar(displayPubkey));
@@ -5229,14 +5574,15 @@
         else mediaWrap.style.display = 'none';
       }
 
-      const stats = (aggregates && aggregates.statsByPost.get(note.id)) || { likes: 0, emoji: 0, boosts: 0, zaps: 0 };
-      const comments = (aggregates && aggregates.commentsByPost.get(note.id)) || [];
-      const likeSet = (aggregates && aggregates.likePubkeysByPost && aggregates.likePubkeysByPost.get(note.id)) || new Set();
-      const emojiMap = (aggregates && aggregates.emojiByPost && aggregates.emojiByPost.get(note.id)) || new Map();
+      const stats = (aggregates && aggregates.statsByPost.get(targetPostId)) || { likes: 0, emoji: 0, boosts: 0, zaps: 0 };
+      const comments = (aggregates && aggregates.commentsByPost.get(targetPostId)) || [];
+      const likeSet = (aggregates && aggregates.likePubkeysByPost && aggregates.likePubkeysByPost.get(targetPostId)) || new Set();
+      const boostSet = (aggregates && aggregates.boostPubkeysByPost && aggregates.boostPubkeysByPost.get(targetPostId)) || new Set();
+      const emojiMap = (aggregates && aggregates.emojiByPost && aggregates.emojiByPost.get(targetPostId)) || new Map();
       const commentsCount = qs('.pfs-comments strong', item);
       const likesCount = qs('.profile-post-like-btn strong', item);
       const zapsCount = qs('.pfs-zaps strong', item);
-      const boostsCount = qs('.pfs-boosts strong', item);
+      const boostsCount = qs('.profile-post-boost-btn strong', item);
       if (commentsCount) commentsCount.textContent = `${comments.length}`;
       if (likesCount) likesCount.textContent = `${stats.likes}`;
       if (zapsCount) zapsCount.textContent = `${stats.zaps}`;
@@ -5246,12 +5592,17 @@
       const likeBtn = qs('.profile-post-like-btn', item);
       if (likeBtn) {
         likeBtn.classList.toggle('active', !!(own && likeSet.has(own)));
-        likeBtn.addEventListener('click', () => window.toggleProfilePostLike(note.id, note.pubkey, pubkey));
+        likeBtn.addEventListener('click', () => window.toggleProfilePostLike(targetPostId, targetPostPubkey, pubkey));
+      }
+      const boostBtn = qs('.profile-post-boost-btn', item);
+      if (boostBtn) {
+        boostBtn.classList.toggle('boosted', !!(own && boostSet.has(own)));
+        boostBtn.addEventListener('click', () => window.toggleProfilePostBoost(targetPostId, targetPostPubkey, pubkey));
       }
 
       const emojiPlusBtn = qs('.profile-post-emoji-btn', item);
       if (emojiPlusBtn) {
-        emojiPlusBtn.addEventListener('click', () => window.openReactionPickerForPost(note.id, note.pubkey, pubkey));
+        emojiPlusBtn.addEventListener('click', () => window.openReactionPickerForPost(targetPostId, targetPostPubkey, pubkey));
       }
 
       const emojiBar = qs('.profile-feed-emoji-bar', item);
@@ -5274,7 +5625,7 @@
             chip.className = 'stream-emoji-chip' + (own && entry.pubkeys.has(own) ? ' active' : '');
             chip.title = `${entry.label || entry.key} (${entry.pubkeys.size})`;
             chip.addEventListener('click', () => {
-              window.toggleProfilePostEmoji(note.id, note.pubkey, pubkey, entry.key, entry.imageUrl || '', entry.shortcode || '');
+              window.toggleProfilePostEmoji(targetPostId, targetPostPubkey, pubkey, entry.key, entry.imageUrl || '', entry.shortcode || '');
             });
 
             const countEl = document.createElement('span');
@@ -5384,7 +5735,7 @@
           const original = commentBtn.textContent;
           commentBtn.textContent = 'Posting...';
           try {
-            const tags = [['e', note.id], ['p', note.pubkey]];
+            const tags = [['e', targetPostId], ['p', targetPostPubkey]];
             const signed = await signAndPublish(1, content, tags);
             const map = state.profileNotesByPubkey.get(pubkey) || new Map();
             map.set(signed.id, signed);
@@ -6068,7 +6419,10 @@
 
     const bio = qs('#profBio');
     const bioText = (p.about || 'No bio yet.').trim() || 'No bio yet.';
-    if (bio) bio.textContent = bioText;
+    if (bio) {
+      bio.innerHTML = '';
+      bio.appendChild(renderNostrContent(bioText));
+    }
 
     const bioToggle = qs('#profBioToggle');
     const isExpanded = !!state.profileBioExpandedByPubkey.get(pubkey);
@@ -6298,6 +6652,7 @@
     state.streamBoostCheckPendingByAddress = new Set();
     state.streamReactionPublishPendingByKey = new Set();
     state.postReactionPublishPendingByNoteAndKey = new Set();
+    state.postBoostPublishPendingByNoteId = new Set();
     state.user = { pubkey, profile: state.profilesByPubkey.get(pubkey) || null };
     ensureNip05Verification(pubkey, state.user.profile && state.user.profile.nip05 || '').catch(() => {});
     setUserUi();
@@ -6729,6 +7084,73 @@
     return stream;
   }
 
+  function prefixLinesForMarkup(rawText, prefixBuilder) {
+    const lines = String(rawText || '').split('\n');
+    return lines.map((line, index) => {
+      if (!line.trim()) return line;
+      return prefixBuilder(line, index);
+    }).join('\n');
+  }
+
+  function applyNostrMarkupToTextarea(textarea, action) {
+    if (!textarea || !('value' in textarea)) return;
+    const current = String(textarea.value || '');
+    const start = Number(textarea.selectionStart || 0);
+    const end = Number(textarea.selectionEnd || 0);
+    const selected = current.slice(start, end);
+    const before = current.slice(0, start);
+    const after = current.slice(end);
+    const hasSelection = start !== end;
+    const marker = {
+      bold: '**',
+      italic: '*',
+      strike: '~~',
+      code: '`'
+    };
+
+    let replacement = selected;
+    let nextSelectionStart = 0;
+    let nextSelectionEnd = 0;
+
+    if (action === 'h1') {
+      replacement = prefixLinesForMarkup(hasSelection ? selected : 'Heading 1', (line) => `# ${line.replace(/^\s*#{1,3}\s+/, '')}`);
+    } else if (action === 'h2') {
+      replacement = prefixLinesForMarkup(hasSelection ? selected : 'Heading 2', (line) => `## ${line.replace(/^\s*#{1,3}\s+/, '')}`);
+    } else if (action === 'h3') {
+      replacement = prefixLinesForMarkup(hasSelection ? selected : 'Heading 3', (line) => `### ${line.replace(/^\s*#{1,3}\s+/, '')}`);
+    } else if (action === 'ul') {
+      replacement = prefixLinesForMarkup(hasSelection ? selected : 'Item one', (line) => line.trim().startsWith('- ') ? line : `- ${line}`);
+    } else if (action === 'ol') {
+      replacement = prefixLinesForMarkup(hasSelection ? selected : 'First', (line, idx) => line.match(/^\s*\d+\.\s+/) ? line : `${idx + 1}. ${line}`);
+    } else if (action === 'quote') {
+      replacement = prefixLinesForMarkup(hasSelection ? selected : 'This is a blockquote.', (line) => line.trim().startsWith('> ') ? line : `> ${line}`);
+    } else if (marker[action]) {
+      const token = marker[action];
+      const base = hasSelection ? selected : (action === 'code' ? 'inline code' : 'text');
+      replacement = `${token}${base}${token}`;
+      if (!hasSelection) {
+        nextSelectionStart = token.length;
+        nextSelectionEnd = token.length + base.length;
+      }
+    } else {
+      return;
+    }
+
+    textarea.value = `${before}${replacement}${after}`;
+    const anchor = before.length;
+    if (!hasSelection && (nextSelectionEnd > nextSelectionStart)) {
+      textarea.setSelectionRange(anchor + nextSelectionStart, anchor + nextSelectionEnd);
+    } else {
+      const caret = anchor + replacement.length;
+      textarea.setSelectionRange(caret, caret);
+    }
+    textarea.focus();
+
+    if (textarea.id === 'profileComposeText' && typeof window.profileComposeInput === 'function') {
+      window.profileComposeInput(textarea);
+    }
+  }
+
   async function sendChatMessage() {
     const input = qs('.chat-inp');
     const text = (input && input.value.trim()) || '';
@@ -6864,6 +7286,14 @@
     window.closeAllDD = function () {
       window.closeDD('logo');
       window.closeDD('profile');
+    };
+
+    window.applyNostrMarkup = function (targetId, action) {
+      const id = String(targetId || '').trim();
+      if (!id || !action) return;
+      const textarea = qs(`#${id}`);
+      if (!textarea) return;
+      applyNostrMarkupToTextarea(textarea, String(action || '').trim().toLowerCase());
     };
 
     // Communities integration context:
@@ -7662,6 +8092,36 @@
       await togglePostReactionByMeta(noteId, notePubkey, profilePubkey, { key: '+', label: '❤', imageUrl: '', shortcode: '' });
     };
 
+    window.toggleProfilePostBoost = async function (noteId, notePubkey, profilePubkey) {
+      if (!noteId || !notePubkey || !profilePubkey) return;
+      if (!state.user) { window.openLogin(); return; }
+      if (state.postBoostPublishPendingByNoteId.has(noteId)) return;
+      state.postBoostPublishPendingByNoteId.add(noteId);
+
+      try {
+        const map = state.profileNotesByPubkey.get(profilePubkey) || new Map();
+        let existingBoostId = findOwnPostBoostIdFromProfileMap(noteId, profilePubkey);
+        if (!existingBoostId) existingBoostId = await findOwnPostBoostId(noteId);
+
+        if (existingBoostId) {
+          const deletion = await signAndPublish(KIND_DELETION, 'removed post boost', [['e', existingBoostId], ['k', '6'], ['p', notePubkey]]);
+          if (deletion && deletion.id) map.set(deletion.id, deletion);
+        } else {
+          const sourceNote = map.get(noteId);
+          const repostContent = sourceNote && sourceNote.id === noteId ? JSON.stringify(sourceNote) : '';
+          const repost = await signAndPublish(6, repostContent, [['e', noteId], ['p', notePubkey]]);
+          if (repost && repost.id) map.set(repost.id, repost);
+        }
+
+        state.profileNotesByPubkey.set(profilePubkey, map);
+        renderProfileFeed(profilePubkey);
+      } catch (err) {
+        alert(err && err.message ? err.message : 'Failed to update post boost.');
+      } finally {
+        state.postBoostPublishPendingByNoteId.delete(noteId);
+      }
+    };
+
     window.toggleProfilePostEmoji = async function (noteId, notePubkey, profilePubkey, reactionKey, imageUrl = '', shortcode = '') {
       const knownMeta = state.streamReactionMetaByKey.get(reactionKey) || {};
       const reactionMeta = {
@@ -7899,15 +8359,8 @@
     };
 
     // ---- Compose / post note on own profile ----
-    window.profileComposeInput = function (el) {
-      const max = 4096;
-      const value = el && typeof el.value === 'string' ? el.value : '';
-      const rem = max - value.length;
-      const chars = qs('#profileComposeChars');
-      if (chars) {
-        chars.textContent = `${rem}`;
-        chars.style.color = rem < 50 ? 'var(--live)' : '';
-      }
+    window.profileComposeInput = function () {
+      // Kept for backward-compatible inline handlers. Counter UI was removed.
     };
 
     window.openComposeUploadModal = function () {
@@ -8268,6 +8721,7 @@
       state.chatMessageEventsById = new Map();
       state.chatLikePublishPendingByMessageId = new Set();
       state.postReactionPublishPendingByNoteAndKey = new Set();
+      state.postBoostPublishPendingByNoteId = new Set();
       state.reactionPickerTarget = null;
       state.shareModalStreamAddress = '';
       state.composeUploadSource = 'nostr_build';

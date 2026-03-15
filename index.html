@@ -252,6 +252,18 @@
       <div class="onboard-form-grid">
         <div class="fg full" style="margin:0">
           <label>Bio</label>
+          <div class="nostr-markup-toolbar">
+            <button type="button" onclick="applyNostrMarkup('onbBio','h1')">H1</button>
+            <button type="button" onclick="applyNostrMarkup('onbBio','h2')">H2</button>
+            <button type="button" onclick="applyNostrMarkup('onbBio','h3')">H3</button>
+            <button type="button" onclick="applyNostrMarkup('onbBio','bold')">B</button>
+            <button type="button" onclick="applyNostrMarkup('onbBio','italic')">I</button>
+            <button type="button" onclick="applyNostrMarkup('onbBio','strike')">S</button>
+            <button type="button" onclick="applyNostrMarkup('onbBio','ul')">UL</button>
+            <button type="button" onclick="applyNostrMarkup('onbBio','ol')">OL</button>
+            <button type="button" onclick="applyNostrMarkup('onbBio','quote')">"</button>
+            <button type="button" onclick="applyNostrMarkup('onbBio','code')">&lt;/&gt;</button>
+          </div>
           <textarea id="onbBio" placeholder="Tell people what you stream, build, or obsess over..." style="height:70px;resize:none;"></textarea>
         </div>
         <div class="fg" style="margin:0">
@@ -324,6 +336,18 @@
       <!-- Bio -->
       <div class="fg" style="margin-top:.7rem">
         <label>Bio (about)</label>
+        <div class="nostr-markup-toolbar">
+          <button type="button" onclick="applyNostrMarkup('settingsAbout','h1')">H1</button>
+          <button type="button" onclick="applyNostrMarkup('settingsAbout','h2')">H2</button>
+          <button type="button" onclick="applyNostrMarkup('settingsAbout','h3')">H3</button>
+          <button type="button" onclick="applyNostrMarkup('settingsAbout','bold')">B</button>
+          <button type="button" onclick="applyNostrMarkup('settingsAbout','italic')">I</button>
+          <button type="button" onclick="applyNostrMarkup('settingsAbout','strike')">S</button>
+          <button type="button" onclick="applyNostrMarkup('settingsAbout','ul')">UL</button>
+          <button type="button" onclick="applyNostrMarkup('settingsAbout','ol')">OL</button>
+          <button type="button" onclick="applyNostrMarkup('settingsAbout','quote')">"</button>
+          <button type="button" onclick="applyNostrMarkup('settingsAbout','code')">&lt;/&gt;</button>
+        </div>
         <textarea id="settingsAbout" placeholder="Tell people what you stream, build, or obsess over..." style="min-height:80px;resize:vertical;"></textarea>
       </div>
 
@@ -736,9 +760,21 @@
       </div>
       <div class="chat-bottom">
         <div class="chat-iw">
-          <textarea class="chat-inp" placeholder="Send a message..." rows="2"></textarea>
+          <textarea class="chat-inp" id="chatInputText" placeholder="Send a message..." rows="2"></textarea>
         </div>
         <div class="chat-acts">
+          <div class="nostr-markup-toolbar nostr-markup-toolbar-chat">
+            <button type="button" onclick="applyNostrMarkup('chatInputText','h1')">H1</button>
+            <button type="button" onclick="applyNostrMarkup('chatInputText','h2')">H2</button>
+            <button type="button" onclick="applyNostrMarkup('chatInputText','h3')">H3</button>
+            <button type="button" onclick="applyNostrMarkup('chatInputText','bold')">B</button>
+            <button type="button" onclick="applyNostrMarkup('chatInputText','italic')">I</button>
+            <button type="button" onclick="applyNostrMarkup('chatInputText','strike')">S</button>
+            <button type="button" onclick="applyNostrMarkup('chatInputText','ul')">UL</button>
+            <button type="button" onclick="applyNostrMarkup('chatInputText','ol')">OL</button>
+            <button type="button" onclick="applyNostrMarkup('chatInputText','quote')">"</button>
+            <button type="button" onclick="applyNostrMarkup('chatInputText','code')">&lt;/&gt;</button>
+          </div>
           <button class="chat-send-btn">Send</button>
         </div>
       </div>
@@ -840,15 +876,28 @@
         <!-- Compose box: only shown on own profile -->
         <div class="profile-compose-box hidden" id="profileComposeBox">
           <div class="profile-compose-header">
-            <div class="profile-compose-av" id="profileComposeAv">U</div>
-            <span class="profile-compose-label">Share a note</span>
+            <div class="profile-compose-ident">
+              <div class="profile-compose-av" id="profileComposeAv">U</div>
+              <span class="profile-compose-label">Share a note</span>
+            </div>
+            <div class="profile-compose-toolbar">
+              <div class="nostr-markup-toolbar nostr-markup-toolbar-compose">
+                <button type="button" onclick="applyNostrMarkup('profileComposeText','h1')">H1</button>
+                <button type="button" onclick="applyNostrMarkup('profileComposeText','h2')">H2</button>
+                <button type="button" onclick="applyNostrMarkup('profileComposeText','h3')">H3</button>
+                <button type="button" onclick="applyNostrMarkup('profileComposeText','bold')">B</button>
+                <button type="button" onclick="applyNostrMarkup('profileComposeText','italic')">I</button>
+                <button type="button" onclick="applyNostrMarkup('profileComposeText','strike')">S</button>
+                <button type="button" onclick="applyNostrMarkup('profileComposeText','ul')">UL</button>
+                <button type="button" onclick="applyNostrMarkup('profileComposeText','ol')">OL</button>
+                <button type="button" onclick="applyNostrMarkup('profileComposeText','quote')">"</button>
+                <button type="button" onclick="applyNostrMarkup('profileComposeText','code')">&lt;/&gt;</button>
+              </div>
+              <button class="profile-compose-upload-btn" id="profileComposeUploadBtn" onclick="openComposeUploadModal()">Upload</button>
+              <button class="profile-compose-btn" id="profileComposeBtn" onclick="publishProfileNote()">Post Note</button>
+            </div>
           </div>
-          <div class="profile-compose-toolbar">
-            <button class="profile-compose-upload-btn" id="profileComposeUploadBtn" onclick="openComposeUploadModal()">Upload</button>
-            <span class="profile-compose-chars" id="profileComposeChars">4096</span>
-            <button class="profile-compose-btn" id="profileComposeBtn" onclick="publishProfileNote()">Post Note</button>
-          </div>
-          <textarea class="profile-compose-textarea" id="profileComposeText" placeholder="What's on your mind?" maxlength="4096" oninput="profileComposeInput(this)"></textarea>
+          <textarea class="profile-compose-textarea" id="profileComposeText" placeholder="What's on your mind?" maxlength="4096"></textarea>
         </div>
 
         <div class="profile-card" id="profileLiveWrap" style="display:none;">
