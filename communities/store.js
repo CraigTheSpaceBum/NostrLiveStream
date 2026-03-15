@@ -210,6 +210,40 @@ export function createCommunityStore(options = {}) {
     return member;
   }
 
+  function syncRoleAssignments(communityId, roleId, pubkeys = []) {
+    if (!communityId || !roleId) return;
+    ensureCommunityContainers(communityId);
+    const desired = new Set(unique(pubkeys));
+    const list = state.data.membersByCommunity[communityId] || [];
+
+    list.forEach((member) => {
+      if (!member || !member.pubkey) return;
+      if (!Array.isArray(member.roles)) member.roles = ['member'];
+      const hasRole = member.roles.includes(roleId);
+      if (hasRole && !desired.has(member.pubkey)) {
+        member.roles = member.roles.filter((role) => role !== roleId);
+        if (!member.roles.length) member.roles = ['member'];
+      }
+    });
+
+    desired.forEach((pubkey) => {
+      ensureProfile(pubkey);
+      ensureMember(communityId, pubkey, [roleId]);
+    });
+  }
+
+  function refreshLeadershipLists(communityId) {
+    const community = getCommunity(communityId);
+    if (!community) return;
+    const members = state.data.membersByCommunity[communityId] || [];
+    community.moderatorPubkeys = unique(members
+      .filter((member) => Array.isArray(member.roles) && member.roles.includes('moderator'))
+      .map((member) => member.pubkey));
+    community.adminPubkeys = unique(members
+      .filter((member) => Array.isArray(member.roles) && member.roles.includes('admin'))
+      .map((member) => member.pubkey));
+  }
+
   function getMemberRoles(communityId = state.activeCommunityId, pubkey = state.currentUserPubkey) {
     const member = getMember(communityId, pubkey);
     if (member) return member.roles || ['member'];
@@ -577,6 +611,7 @@ export function createCommunityStore(options = {}) {
     if (!can('manage_roles', null, community)) return { ok: false, reason: 'permission_denied' };
     const member = ensureMember(communityId, pubkey, ['member']);
     member.roles = unique(roleIds || ['member']);
+    refreshLeadershipLists(communityId);
     emitter.emit({ type: 'member_role_changed', communityId, pubkey });
     return { ok: true };
   }
@@ -680,6 +715,7 @@ export function createCommunityStore(options = {}) {
     const rules = Array.isArray(payload.rules) ? unique(payload.rules) : parseLines(payload.rules);
     const topics = Array.isArray(payload.topics) ? unique(payload.topics) : parseCsv(payload.topics);
     const moderators = Array.isArray(payload.moderators) ? unique(payload.moderators) : parseCsv(payload.moderators);
+    const admins = Array.isArray(payload.admins) ? unique(payload.admins) : parseCsv(payload.admins);
     const relays = Array.isArray(payload.allowedRelays) ? unique(payload.allowedRelays) : parseCsv(payload.allowedRelays);
     const joinMode = String(payload.joinMode || payload.membershipMode || (type === 'private' ? 'approval' : 'open')).trim();
 
@@ -695,6 +731,7 @@ export function createCommunityStore(options = {}) {
       topics,
       ownerPubkey: state.currentUserPubkey,
       moderatorPubkeys: moderators,
+      adminPubkeys: admins,
       joinMode,
       discoverable: type === 'public' ? (payload.discoverable !== false) : false,
       defaultChannelId: '',
@@ -716,6 +753,11 @@ export function createCommunityStore(options = {}) {
       ensureProfile(pubkey);
       ensureMember(id, pubkey, ['moderator']);
     });
+    admins.forEach((pubkey) => {
+      ensureProfile(pubkey);
+      ensureMember(id, pubkey, ['admin']);
+    });
+    refreshLeadershipLists(id);
 
     const seedChannels = [];
     seedChannels.push({
@@ -785,8 +827,13 @@ export function createCommunityStore(options = {}) {
     if (patch.allowedRelays != null) community.allowedRelays = Array.isArray(patch.allowedRelays) ? unique(patch.allowedRelays) : parseCsv(patch.allowedRelays);
     if (patch.moderatorPubkeys != null) {
       community.moderatorPubkeys = Array.isArray(patch.moderatorPubkeys) ? unique(patch.moderatorPubkeys) : parseCsv(patch.moderatorPubkeys);
-      community.moderatorPubkeys.forEach((pubkey) => ensureMember(communityId, pubkey, ['moderator']));
+      syncRoleAssignments(communityId, 'moderator', community.moderatorPubkeys);
     }
+    if (patch.adminPubkeys != null) {
+      community.adminPubkeys = Array.isArray(patch.adminPubkeys) ? unique(patch.adminPubkeys) : parseCsv(patch.adminPubkeys);
+      syncRoleAssignments(communityId, 'admin', community.adminPubkeys);
+    }
+    refreshLeadershipLists(communityId);
     community.updatedAt = nowMs();
 
     emitter.emit({ type: 'community_updated', communityId, patch });
@@ -826,6 +873,7 @@ export function createCommunityStore(options = {}) {
         topics: Array.isArray(payload.topics) ? unique(payload.topics) : [],
         ownerPubkey: String(payload.ownerPubkey || ''),
         moderatorPubkeys: Array.isArray(payload.moderatorPubkeys) ? unique(payload.moderatorPubkeys) : [],
+        adminPubkeys: Array.isArray(payload.adminPubkeys) ? unique(payload.adminPubkeys) : [],
         joinMode: String(payload.joinMode || 'open'),
         discoverable: payload.discoverable !== false,
         defaultChannelId: String(payload.defaultChannelId || ''),
@@ -857,11 +905,14 @@ export function createCommunityStore(options = {}) {
       if (payload.topics != null) community.topics = Array.isArray(payload.topics) ? unique(payload.topics) : parseCsv(payload.topics);
       if (payload.allowedRelays != null) community.allowedRelays = Array.isArray(payload.allowedRelays) ? unique(payload.allowedRelays) : parseCsv(payload.allowedRelays);
       if (payload.moderatorPubkeys != null) community.moderatorPubkeys = Array.isArray(payload.moderatorPubkeys) ? unique(payload.moderatorPubkeys) : parseCsv(payload.moderatorPubkeys);
+      if (payload.adminPubkeys != null) community.adminPubkeys = Array.isArray(payload.adminPubkeys) ? unique(payload.adminPubkeys) : parseCsv(payload.adminPubkeys);
     }
 
     ensureCommunityContainers(id);
     if (community.ownerPubkey) ensureMember(id, community.ownerPubkey, ['owner']);
     (community.moderatorPubkeys || []).forEach((pubkey) => ensureMember(id, pubkey, ['moderator']));
+    (community.adminPubkeys || []).forEach((pubkey) => ensureMember(id, pubkey, ['admin']));
+    refreshLeadershipLists(id);
     touchCommunity(id, community.updatedAt || nowMs());
     ensureActiveSelection();
     emitter.emit({ type: 'community_ingested', communityId: id });
@@ -984,6 +1035,7 @@ export function createCommunityStore(options = {}) {
       }));
     }
 
+    refreshLeadershipLists(communityId);
     if (members.includes(state.currentUserPubkey)) joinCommunity(communityId, { source: 'nostr', silent: true });
     emitter.emit({ type: 'community_members_ingested', communityId, count: members.length });
     return true;
@@ -992,14 +1044,23 @@ export function createCommunityStore(options = {}) {
   function ingestCommunityModerators(payload = {}) {
     const communityId = String(payload.communityId || '').trim();
     const moderators = unique(payload.moderators || []);
+    const admins = unique(payload.admins || []);
     if (!communityId) return false;
 
     const community = getCommunity(communityId);
     if (!community) return false;
-    community.moderatorPubkeys = moderators;
 
-    moderators.forEach((pubkey) => ensureMember(communityId, pubkey, ['moderator']));
-    emitter.emit({ type: 'community_moderators_ingested', communityId, count: moderators.length });
+    if (payload.moderators != null) {
+      community.moderatorPubkeys = moderators;
+      syncRoleAssignments(communityId, 'moderator', moderators);
+    }
+    if (payload.admins != null) {
+      community.adminPubkeys = admins;
+      syncRoleAssignments(communityId, 'admin', admins);
+    }
+
+    refreshLeadershipLists(communityId);
+    emitter.emit({ type: 'community_moderators_ingested', communityId, count: (community.moderatorPubkeys || []).length, adminCount: (community.adminPubkeys || []).length });
     return true;
   }
 

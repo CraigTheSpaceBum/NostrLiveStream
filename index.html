@@ -30,7 +30,7 @@
       <button class="dd-item" onclick="closeAllDD()"><span class="ddi">&#128172;</span>Messages</button>
       <button class="dd-item" onclick="closeAllDD()"><span class="ddi">&#128279;</span>Relays</button>
       <div class="dd-sep"></div>
-      <button class="dd-item" onclick="openFaq();closeAllDD()"><span class="ddi">&#10067;</span>FAQ & Help</button>
+      <button class="dd-item" onclick="showPage('faq');closeAllDD()"><span class="ddi">&#10067;</span>FAQ & Help</button>
     </div>
   </div>
 
@@ -658,6 +658,140 @@
 <div id="communitiesPage">
   <div id="communitiesRoot"></div>
 </div>
+
+<!-- ========= FAQ PAGE ========= -->
+<div id="faqPage">
+  <div class="faq-page-wrap">
+    <section class="faq-page-hero faq-kid-hero">
+      <h1>FAQ and Help (Super Simple)</h1>
+      <p>You are in the right place.</p>
+      <p>If this is your first time, read from top to bottom.</p>
+      <p>Short version: Sifaka Live helps people find live streams on Nostr.</p>
+    </section>
+
+    <section class="faq-card">
+      <h2>What is Nostr?</h2>
+      <p>Nostr is an open social network.</p>
+      <p>Open means no single company owns it.</p>
+      <div class="faq-flow">
+        <span class="faq-flow-box">You own your account</span>
+        <span class="faq-flow-arrow">-&gt;</span>
+        <span class="faq-flow-box">Apps can change</span>
+        <span class="faq-flow-arrow">-&gt;</span>
+        <span class="faq-flow-box">You keep your followers</span>
+      </div>
+    </section>
+
+    <section class="faq-card">
+      <h2>What is Sifaka Live?</h2>
+      <p>Sifaka Live is a stream directory.</p>
+      <p>Think: TV guide for Nostr live streams.</p>
+      <p>Important: Sifaka Live helps discovery. It does not host the video.</p>
+    </section>
+
+    <section class="faq-card">
+      <h2>Why creators like this</h2>
+      <ul>
+        <li>Direct tips with zaps (Lightning payments)</li>
+        <li>No big platform middleman</li>
+        <li>You can run your own stream server</li>
+      </ul>
+      <div class="faq-simple-box">
+        <strong>Money flow:</strong>
+        <p>Old way: Viewer -&gt; Platform -&gt; Creator (fees taken)</p>
+        <p>Nostr way: Viewer -&gt; Creator (direct)</p>
+      </div>
+    </section>
+
+    <section class="faq-card">
+      <h2>Start streaming fast (Easy Way)</h2>
+      <p>Best for beginners. No server setup needed.</p>
+
+      <div class="faq-step-strip">
+        <div class="faq-step-item"><span class="faq-step-num">1</span><p>Make a Nostr account</p></div>
+        <div class="faq-step-item"><span class="faq-step-num">2</span><p>Install OBS</p></div>
+        <div class="faq-step-item"><span class="faq-step-num">3</span><p>Open zap.stream</p></div>
+        <div class="faq-step-item"><span class="faq-step-num">4</span><p>Paste Stream URL + Key in OBS</p></div>
+        <div class="faq-step-item"><span class="faq-step-num">5</span><p>Click Start Streaming</p></div>
+      </div>
+
+      <p class="faq-mini-title">Do this exactly:</p>
+      <ol class="faq-do-list">
+        <li>Open Primal (or Snort) and create your Nostr account.</li>
+        <li>Install OBS Studio on your computer.</li>
+        <li>Open zap.stream and sign in with your Nostr account.</li>
+        <li>On zap.stream click Start Streaming and copy Stream URL + Stream Key.</li>
+        <li>In OBS go to Settings -&gt; Stream, paste URL + Key, then click Start Streaming.</li>
+      </ol>
+
+      <h3>Open these websites</h3>
+      <div class="faq-link-grid">
+        <a class="faq-link-card" href="https://primal.net" target="_blank" rel="noopener noreferrer"><strong>Primal</strong><span>Create a Nostr account</span></a>
+        <a class="faq-link-card" href="https://snort.social" target="_blank" rel="noopener noreferrer"><strong>Snort</strong><span>Another Nostr client option</span></a>
+        <a class="faq-link-card" href="https://obsproject.com/download" target="_blank" rel="noopener noreferrer"><strong>OBS Studio</strong><span>Download streaming software</span></a>
+        <a class="faq-link-card" href="https://zap.stream" target="_blank" rel="noopener noreferrer"><strong>zap.stream</strong><span>Hosted way to go live fast</span></a>
+      </div>
+    </section>
+
+    <section class="faq-card">
+      <h2>Run your own server (Owncast)</h2>
+      <p>This gives you the most control.</p>
+      <p>You control your stream, chat, and website.</p>
+
+      <div class="faq-step-strip faq-step-strip-compact">
+        <div class="faq-step-item"><span class="faq-step-num">1</span><p>Get a small VPS server</p></div>
+        <div class="faq-step-item"><span class="faq-step-num">2</span><p>Install Owncast</p></div>
+        <div class="faq-step-item"><span class="faq-step-num">3</span><p>Open <code>/admin</code> and set password + stream key</p></div>
+        <div class="faq-step-item"><span class="faq-step-num">4</span><p>Paste stream key into OBS</p></div>
+        <div class="faq-step-item"><span class="faq-step-num">5</span><p>Start streaming and announce on Nostr</p></div>
+      </div>
+
+      <p class="faq-mini-title">Do this in order (click links below):</p>
+      <ol class="faq-do-list">
+        <li>Pick a server provider and launch a small VPS.</li>
+        <li>Install Owncast using the official quickstart page.</li>
+        <li>Open your Owncast <code>/admin</code> page and finish setup.</li>
+        <li>Copy your Owncast stream key into OBS Settings -&gt; Stream.</li>
+        <li>Start streaming from OBS, then share your stream on Nostr.</li>
+      </ol>
+
+      <h3>Owncast links (official)</h3>
+      <ul class="faq-link-list">
+        <li><a href="https://owncast.online/quickstart/installation/" target="_blank" rel="noopener noreferrer">Owncast Installation (Quickstart)</a></li>
+        <li><a href="https://owncast.online/quickstart/providers/" target="_blank" rel="noopener noreferrer">One-click providers (easy server setup)</a></li>
+        <li><a href="https://owncast.online/quickstart/configure/" target="_blank" rel="noopener noreferrer">Configure Owncast after install</a></li>
+        <li><a href="https://owncast.online/quickstart/nextsteps/" target="_blank" rel="noopener noreferrer">Next steps: SSL + auto-start service</a></li>
+        <li><a href="https://owncast.online/docs/directory/" target="_blank" rel="noopener noreferrer">Optional: list your stream in Owncast Directory</a></li>
+      </ul>
+    </section>
+
+    <section class="faq-card">
+      <h2>How streaming works (picture in words)</h2>
+      <div class="faq-flow faq-flow-big">
+        <span class="faq-flow-box">Streamer</span>
+        <span class="faq-flow-arrow">-&gt;</span>
+        <span class="faq-flow-box">Streaming Server</span>
+        <span class="faq-flow-arrow">-&gt;</span>
+        <span class="faq-flow-box">Nostr</span>
+        <span class="faq-flow-arrow">-&gt;</span>
+        <span class="faq-flow-box">Sifaka Live</span>
+        <span class="faq-flow-arrow">-&gt;</span>
+        <span class="faq-flow-box">Viewers</span>
+      </div>
+    </section>
+
+    <section class="faq-card faq-summary-card">
+      <h2>Simple summary</h2>
+      <p>Sifaka Live helps people find live streams on Nostr.</p>
+      <p>Creators can get paid directly and keep more control.</p>
+      <div class="faq-actions">
+        <button class="btn btn-primary" onclick="showPage('home')">Back to Live Now</button>
+        <button class="btn btn-ghost" onclick="showPage('communities')">Open Communities</button>
+      </div>
+    </section>
+  </div>
+</div>
+
 <!-- ========= VIDEO PAGE ========= -->
 <div id="videoPage">
   <div class="video-layout">

@@ -72,13 +72,26 @@ export function createCommunitiesUI(input) {
     memberPanelOpen: true,
     createBusy: false,
     saveBusy: false,
-    statusMsg: ''
+    statusMsg: '',
+    discoveryLimit: 18,
+    discoveryChunk: 18,
+    discoveryObserver: null
   };
 
   function closeTransient() {
     ui.selectedMember = '';
     ui.contextMessageId = '';
     ui.emojiOpen = false;
+  }
+
+  function resetDiscoveryWindow() {
+    ui.discoveryLimit = ui.discoveryChunk;
+  }
+
+  function disconnectDiscoveryObserver() {
+    if (!ui.discoveryObserver) return;
+    ui.discoveryObserver.disconnect();
+    ui.discoveryObserver = null;
   }
 
   function setSession(next = {}) {
@@ -146,9 +159,18 @@ export function createCommunitiesUI(input) {
     const community = store.getCommunity();
     const channel = store.getChannel();
     const joinedCommunityIds = new Set(state.joinedCommunityIds);
-    const suggestions = store.getDiscoverySuggestions(6);
 
     const communities = state.data.communities || [];
+    const publicCommunities = communities
+      .filter((entry) => entry.type !== 'private' && entry.discoverable !== false)
+      .slice()
+      .sort((a, b) => {
+        const aLast = Number(state.lastActiveByCommunity.get(a.id) || 0);
+        const bLast = Number(state.lastActiveByCommunity.get(b.id) || 0);
+        if (aLast !== bLast) return bLast - aLast;
+        return String(a.title || '').localeCompare(String(b.title || ''));
+      });
+    const suggestions = store.getDiscoverySuggestions(6);
     const channels = community ? store.getChannels(community.id) : [];
     const messages = channel ? store.filteredMessages(channel.id) : [];
     const pins = channel ? store.getPinnedMessages(channel.id) : [];
@@ -159,13 +181,12 @@ export function createCommunitiesUI(input) {
     const relayStatuses = Array.from(state.relayStatusByUrl.values());
     const connectedRelays = relayStatuses.filter((value) => value === 'open').length;
 
-    const railHtml = communities.map((entry) => {
+    const railCommunities = communities.filter((entry) => joinedCommunityIds.has(entry.id));
+    const railHtml = railCommunities.map((entry) => {
       const active = community && entry.id === community.id;
-      const joined = joinedCommunityIds.has(entry.id);
       return `
         <button class="sc-server-pill${active ? ' active' : ''}" data-community="${esc(entry.id)}" title="${esc(entry.title)}">
           <span>${esc(entry.icon || initials(entry.title))}</span>
-          ${joined ? '' : '<i class="sc-unjoined-dot"></i>'}
         </button>
       `;
     }).join('');
@@ -246,9 +267,8 @@ export function createCommunitiesUI(input) {
       <div class="sc-wrap" id="scWrap">
         <aside class="sc-server-rail">
           <div class="sc-rail-top">SC</div>
-          <div class="sc-server-list">${railHtml}</div>
-          <button class="sc-server-add" id="scCreateCommunityBtn" title="Create community">+</button>
-          <button class="sc-server-add" id="scDiscoverBtn" title="Discover communities">?</button>
+          <button class="sc-server-add sc-server-add-primary" id="scCreateCommunityBtn" title="Create or join communities">+</button>
+          <div class="sc-server-list">${railHtml || '<div class="sc-server-empty">No communities yet</div>'}</div>
         </aside>
 
         <aside class="sc-channel-col">
@@ -291,11 +311,11 @@ export function createCommunitiesUI(input) {
             <section class="sc-feed">
               <div class="sc-empty">
                 <strong>You are not in any communities yet.</strong>
-                <div style="margin-top:.5rem">Join a public group suggestion or create your own Nostr-native community.</div>
-                <div class="sc-discovery-list" style="margin-top:.7rem">${suggestionsHtml || '<div class="sc-empty">No suggestions yet. Try discovery.</div>'}</div>
+                <div style="margin-top:.5rem">Use the + button on the left to create a server or join a public community.</div>
+                <div class="sc-discovery-list" style="margin-top:.7rem">${suggestionsHtml || '<div class="sc-empty">No suggestions yet. Open Join Communities.</div>'}</div>
                 <div style="margin-top:.7rem;display:flex;gap:.4rem;flex-wrap:wrap;">
-                  <button id="scCreateFirstCommunityBtn">Create Community</button>
-                  <button id="scOpenDiscoveryBtn">Open Discovery</button>
+                  <button id="scOpenCommunityHubBtn">Create or Join</button>
+                  <button id="scOpenJoinModalBtn">Browse Public Communities</button>
                 </div>
               </div>
             </section>
@@ -327,7 +347,7 @@ export function createCommunitiesUI(input) {
 
         ${ui.statusMsg ? `<div class="sc-toast">${esc(ui.statusMsg)}</div>` : ''}
         ${ui.selectedMember ? renderProfilePopout(ui.selectedMember, profiles, members, community, store) : ''}
-        ${ui.openModal ? renderModal(ui.openModal, state, community, channel, members, profiles, store, suggestions) : ''}
+        ${ui.openModal ? renderModal(ui.openModal, state, community, channel, members, profiles, store, suggestions, publicCommunities) : ''}
         ${ui.contextMessageId ? renderContextMenu(ui.contextMessageId, ui.contextX, ui.contextY) : ''}
       </div>
     `;
@@ -385,6 +405,7 @@ export function createCommunitiesUI(input) {
             <label>Image URL<input id="scCreateImage" placeholder="https://.../group.jpg"></label>
             <label>Banner URL<input id="scCreateBanner" placeholder="https://.../banner.jpg"></label>
             <label>Moderators (comma pubkeys)<input id="scCreateModerators" placeholder="npub/hex pubkeys separated by commas"></label>
+            <label>Admins (comma pubkeys)<input id="scCreateAdmins" placeholder="npub/hex pubkeys separated by commas"></label>
             <label>Topics (comma)
               <input id="scCreateTopics" placeholder="nostr, livestream, dev">
             </label>
@@ -429,7 +450,7 @@ export function createCommunitiesUI(input) {
       <div class="sc-modal-ov" data-close="modal">
         <div class="sc-modal sc-modal-wide">
           <h4>Community Settings</h4>
-          <p>Edit metadata, moderators, posting policy, and discovery controls.</p>
+          <p>Edit metadata, moderators/admins, posting policy, and discovery controls.</p>
           <div class="sc-form-grid sc-form-grid-2">
             <label>Name<input id="scSettingsName" value="${esc(community.title || '')}"></label>
             <label>Join Mode
@@ -443,6 +464,9 @@ export function createCommunitiesUI(input) {
             <label>Banner URL<input id="scSettingsBanner" value="${esc(community.banner || '')}"></label>
             <label>Moderators (comma pubkeys)
               <input id="scSettingsModerators" value="${esc((community.moderatorPubkeys || []).join(', '))}">
+            </label>
+            <label>Admins (comma pubkeys)
+              <input id="scSettingsAdmins" value="${esc((community.adminPubkeys || []).join(', '))}">
             </label>
             <label>Posting Rules
               <select id="scSettingsPostingPolicy">
@@ -505,7 +529,77 @@ export function createCommunitiesUI(input) {
     `;
   }
 
-  function renderModal(key, state, community, channel, members, profiles, storeRef, suggestions) {
+  function renderCommunityHubModal() {
+    return `
+      <div class="sc-modal-ov" data-close="modal">
+        <div class="sc-modal sc-hub-modal">
+          <h4>Communities</h4>
+          <p>Create your own server or join a public community.</p>
+          <div class="sc-hub-actions">
+            <button class="sc-hub-card" id="scHubCreateBtn">
+              <strong>Create Community</strong>
+              <small>Set up channels, permissions, moderators, and admins.</small>
+            </button>
+            <button class="sc-hub-card" id="scHubJoinBtn">
+              <strong>Join Community</strong>
+              <small>Browse discoverable public communities and join instantly.</small>
+            </button>
+          </div>
+          <div class="sc-modal-foot">
+            <button data-close="modal">Close</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderJoinCommunityModal(state, discoveryCommunities = []) {
+    const joinedCommunityIds = new Set(state.joinedCommunityIds || []);
+    const max = Math.max(ui.discoveryChunk, ui.discoveryLimit);
+    const visible = (discoveryCommunities || []).slice(0, max);
+    const hasMore = visible.length < (discoveryCommunities || []).length;
+
+    const cards = visible.map((entry) => {
+      const members = ((state.data.membersByCommunity || {})[entry.id] || []).length;
+      const joined = joinedCommunityIds.has(entry.id);
+      const media = String(entry.banner || entry.image || '').trim();
+      const mediaHtml = media
+        ? `<span class="sc-community-card-banner has-image" style="background-image:url('${esc(media)}')"></span>`
+        : `<span class="sc-community-card-banner">${esc(entry.icon || initials(entry.title))}</span>`;
+
+      return `
+        <button class="sc-community-card${joined ? ' joined' : ''}" data-discovery-community="${esc(entry.id)}" data-discovery-joined="${joined ? '1' : '0'}">
+          ${mediaHtml}
+          <span class="sc-community-card-main">
+            <strong>${esc(entry.title)}</strong>
+            <small>${esc(entry.description || 'No description yet.')}</small>
+            <i>${members} member${members === 1 ? '' : 's'}</i>
+          </span>
+          <span class="sc-community-card-cta">${joined ? 'Open' : 'Join'}</span>
+        </button>
+      `;
+    }).join('');
+
+    return `
+      <div class="sc-modal-ov" data-close="modal">
+        <div class="sc-modal sc-modal-wide">
+          <h4>Join Community</h4>
+          <p>Public communities discovered from relays. Scroll to load more.</p>
+          <div class="sc-discovery-grid-scroll${hasMore ? ' has-bottom' : ''}" id="scDiscoveryScroll" data-total="${(discoveryCommunities || []).length}">
+            <div class="sc-discovery-grid">${cards || '<div class="sc-empty">No public communities available yet.</div>'}</div>
+            ${hasMore ? '<div class="sc-discovery-sentinel" id="scDiscoverySentinel" aria-hidden="true"></div>' : ''}
+          </div>
+          <div class="sc-modal-foot"><button data-close="modal">Close</button></div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderModal(key, state, community, channel, members, profiles, storeRef, suggestions, publicCommunities) {
+    if (key === 'communityHub') {
+      return renderCommunityHubModal();
+    }
+
     if (key === 'createCommunity') {
       return renderCreateCommunityModal(state);
     }
@@ -570,21 +664,8 @@ export function createCommunitiesUI(input) {
       `;
     }
 
-    if (key === 'discovery') {
-      const list = (suggestions || [])
-        .map((entry) => `<button class="sc-discovery-item" data-discovery-community="${esc(entry.id)}"><strong>${esc(entry.title)}</strong><small>${esc(entry.description || '')}</small></button>`)
-        .join('');
-
-      return `
-        <div class="sc-modal-ov" data-close="modal">
-          <div class="sc-modal">
-            <h4>Community Discovery</h4>
-            <p>Public communities discovered from relays.</p>
-            <div class="sc-discovery-list">${list || '<div class="sc-empty">No public suggestions yet.</div>'}</div>
-            <div class="sc-modal-foot"><button data-close="modal">Close</button></div>
-          </div>
-        </div>
-      `;
+    if (key === 'joinCommunity' || key === 'discovery') {
+      return renderJoinCommunityModal(state, publicCommunities || suggestions || []);
     }
 
     if (key === 'notifications') {
@@ -677,6 +758,8 @@ export function createCommunitiesUI(input) {
   }
 
   function bindHandlers() {
+    disconnectDiscoveryObserver();
+
     root.querySelectorAll('[data-community]').forEach((el) => {
       el.addEventListener('click', () => {
         store.setActiveCommunity(el.getAttribute('data-community'));
@@ -900,10 +983,27 @@ export function createCommunitiesUI(input) {
     }
 
     const createCommunityBtn = root.querySelector('#scCreateCommunityBtn');
-    if (createCommunityBtn) createCommunityBtn.addEventListener('click', () => { ui.openModal = 'createCommunity'; render(); });
+    if (createCommunityBtn) createCommunityBtn.addEventListener('click', () => { ui.openModal = 'communityHub'; render(); });
 
-    const createFirstCommunityBtn = root.querySelector('#scCreateFirstCommunityBtn');
-    if (createFirstCommunityBtn) createFirstCommunityBtn.addEventListener('click', () => { ui.openModal = 'createCommunity'; render(); });
+    const openCommunityHubBtn = root.querySelector('#scOpenCommunityHubBtn');
+    if (openCommunityHubBtn) openCommunityHubBtn.addEventListener('click', () => { ui.openModal = 'communityHub'; render(); });
+
+    const openJoinModalBtn = root.querySelector('#scOpenJoinModalBtn');
+    if (openJoinModalBtn) openJoinModalBtn.addEventListener('click', () => {
+      resetDiscoveryWindow();
+      ui.openModal = 'joinCommunity';
+      render();
+    });
+
+    const hubCreateBtn = root.querySelector('#scHubCreateBtn');
+    if (hubCreateBtn) hubCreateBtn.addEventListener('click', () => { ui.openModal = 'createCommunity'; render(); });
+
+    const hubJoinBtn = root.querySelector('#scHubJoinBtn');
+    if (hubJoinBtn) hubJoinBtn.addEventListener('click', () => {
+      resetDiscoveryWindow();
+      ui.openModal = 'joinCommunity';
+      render();
+    });
 
     const serverSettingsBtn = root.querySelector('#scServerSettingsBtn');
     if (serverSettingsBtn) serverSettingsBtn.addEventListener('click', () => { ui.openModal = 'communitySettings'; render(); });
@@ -916,12 +1016,6 @@ export function createCommunitiesUI(input) {
 
     const notifBtn = root.querySelector('#scNotifBtn');
     if (notifBtn) notifBtn.addEventListener('click', () => { ui.openModal = 'notifications'; render(); });
-
-    const discoverBtn = root.querySelector('#scDiscoverBtn');
-    if (discoverBtn) discoverBtn.addEventListener('click', () => { ui.openModal = 'discovery'; render(); });
-
-    const openDiscoveryBtn = root.querySelector('#scOpenDiscoveryBtn');
-    if (openDiscoveryBtn) openDiscoveryBtn.addEventListener('click', () => { ui.openModal = 'discovery'; render(); });
 
     const inviteBtn = root.querySelector('#scInviteBtn');
     if (inviteBtn) inviteBtn.addEventListener('click', () => { ui.openModal = 'invites'; render(); });
@@ -952,13 +1046,47 @@ export function createCommunitiesUI(input) {
     root.querySelectorAll('[data-discovery-community]').forEach((el) => {
       el.addEventListener('click', async () => {
         const communityId = el.getAttribute('data-discovery-community');
+        if (!communityId) return;
+        const alreadyJoined = el.getAttribute('data-discovery-joined') === '1';
         store.setActiveCommunity(communityId);
-        store.joinCommunity(communityId);
-        await publishMembershipList();
+        if (!alreadyJoined) {
+          store.joinCommunity(communityId);
+          await publishMembershipList();
+        }
         ui.openModal = '';
         render();
       });
     });
+
+    const discoveryScroll = root.querySelector('#scDiscoveryScroll');
+    if (discoveryScroll) {
+      const updateDiscoveryFade = () => {
+        const top = discoveryScroll.scrollTop > 6;
+        const bottom = (discoveryScroll.scrollTop + discoveryScroll.clientHeight) < (discoveryScroll.scrollHeight - 6);
+        discoveryScroll.classList.toggle('has-top', top);
+        discoveryScroll.classList.toggle('has-bottom', bottom);
+      };
+
+      discoveryScroll.addEventListener('scroll', updateDiscoveryFade, { passive: true });
+      window.requestAnimationFrame(updateDiscoveryFade);
+
+      const discoverySentinel = root.querySelector('#scDiscoverySentinel');
+      if (discoverySentinel && typeof window.IntersectionObserver === 'function') {
+        ui.discoveryObserver = new window.IntersectionObserver((entries) => {
+          const seen = entries.some((entry) => entry.isIntersecting);
+          if (!seen) return;
+          const total = Number(discoveryScroll.getAttribute('data-total') || 0);
+          if (!total || ui.discoveryLimit >= total) return;
+          ui.discoveryLimit = Math.min(total, ui.discoveryLimit + ui.discoveryChunk);
+          render();
+        }, {
+          root: discoveryScroll,
+          rootMargin: '120px 0px',
+          threshold: 0.1
+        });
+        ui.discoveryObserver.observe(discoverySentinel);
+      }
+    }
 
     const createCommunitySubmit = root.querySelector('#scCreateCommunitySubmit');
     if (createCommunitySubmit) {
@@ -975,6 +1103,7 @@ export function createCommunitiesUI(input) {
           image: (root.querySelector('#scCreateImage') || {}).value || '',
           banner: (root.querySelector('#scCreateBanner') || {}).value || '',
           moderators: parseCsv((root.querySelector('#scCreateModerators') || {}).value || ''),
+          admins: parseCsv((root.querySelector('#scCreateAdmins') || {}).value || ''),
           topics: parseCsv((root.querySelector('#scCreateTopics') || {}).value || ''),
           joinMode: (root.querySelector('#scCreateJoinMode') || {}).value || 'open',
           postingPolicy: (root.querySelector('#scCreatePostingPolicy') || {}).value || 'members',
@@ -1014,6 +1143,7 @@ export function createCommunitiesUI(input) {
               await nostrBridge.publishCommunityModerators39003({
                 communityId: created.community.id,
                 moderators: created.community.moderatorPubkeys || [],
+                admins: created.community.adminPubkeys || [],
                 postingPolicy: created.community.postingPolicy
               });
             }
@@ -1055,6 +1185,7 @@ export function createCommunitiesUI(input) {
           image: (root.querySelector('#scSettingsImage') || {}).value || '',
           banner: (root.querySelector('#scSettingsBanner') || {}).value || '',
           moderatorPubkeys: parseCsv((root.querySelector('#scSettingsModerators') || {}).value || ''),
+          adminPubkeys: parseCsv((root.querySelector('#scSettingsAdmins') || {}).value || ''),
           joinMode: (root.querySelector('#scSettingsJoinMode') || {}).value || community.joinMode,
           postingPolicy: (root.querySelector('#scSettingsPostingPolicy') || {}).value || community.postingPolicy,
           discoverable: !!((root.querySelector('#scSettingsDiscoverable') || {}).checked),
@@ -1094,6 +1225,7 @@ export function createCommunitiesUI(input) {
               await nostrBridge.publishCommunityModerators39003({
                 communityId: community.id,
                 moderators: patch.moderatorPubkeys,
+                admins: patch.adminPubkeys,
                 postingPolicy: patch.postingPolicy
               });
             }
@@ -1217,6 +1349,7 @@ export function createCommunitiesUI(input) {
   function unmount() {
     if (!mounted) return;
     mounted = false;
+    disconnectDiscoveryObserver();
     if (dispose) dispose();
     dispose = null;
     root.innerHTML = '';

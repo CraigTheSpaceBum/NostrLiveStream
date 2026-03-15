@@ -48,15 +48,19 @@
 
 .sc-server-list {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: .55rem;
   width: 100%;
   align-items: center;
+  overflow-y: auto;
+  padding-bottom: .4rem;
 }
 
 .sc-server-pill,
 .sc-server-add {
   position: relative;
+  flex: 0 0 auto;
   width: 44px;
   height: 44px;
   border-radius: 12px;
@@ -80,6 +84,25 @@
   color: #fff;
   background: linear-gradient(145deg, rgba(232,70,10,.38), rgba(232,70,10,.2));
   box-shadow: 0 0 0 1px rgba(232,70,10,.35), 0 10px 22px rgba(232,70,10,.2);
+}
+
+.sc-server-add-primary {
+  background: linear-gradient(145deg, rgba(130,74,255,.42), rgba(130,74,255,.18));
+  border-color: rgba(180,132,255,.5);
+  color: #efe7ff;
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.sc-server-empty {
+  width: 44px;
+  border: 1px dashed var(--border2);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: .52rem;
+  line-height: 1.25;
+  text-align: center;
+  padding: .45rem .2rem;
 }
 
 .sc-unjoined-dot {
@@ -765,6 +788,185 @@
   border-color: var(--accent);
 }
 
+.sc-hub-modal {
+  width: min(680px, 95vw);
+}
+
+.sc-hub-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .6rem;
+  margin-top: .55rem;
+}
+
+.sc-hub-card {
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  background: linear-gradient(160deg, rgba(18,25,34,.9), rgba(10,14,20,.95));
+  color: var(--text);
+  text-align: left;
+  padding: .7rem .75rem;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: .25rem;
+  transition: transform .16s ease, border-color .16s ease;
+}
+
+.sc-hub-card strong {
+  font-size: .82rem;
+}
+
+.sc-hub-card small {
+  color: var(--text2);
+  font-size: .72rem;
+  line-height: 1.35;
+}
+
+.sc-hub-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.sc-discovery-grid-scroll {
+  position: relative;
+  max-height: min(62vh, 560px);
+  overflow-y: auto;
+  padding: .15rem .1rem .3rem;
+}
+
+.sc-discovery-grid-scroll::before,
+.sc-discovery-grid-scroll::after {
+  content: '';
+  position: sticky;
+  left: 0;
+  right: 0;
+  height: 18px;
+  display: block;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .16s ease;
+  z-index: 2;
+}
+
+.sc-discovery-grid-scroll::before {
+  top: 0;
+  background: linear-gradient(180deg, rgba(7,10,15,.95), rgba(7,10,15,0));
+  margin-bottom: -18px;
+}
+
+.sc-discovery-grid-scroll::after {
+  bottom: 0;
+  background: linear-gradient(0deg, rgba(7,10,15,.95), rgba(7,10,15,0));
+  margin-top: -18px;
+}
+
+.sc-discovery-grid-scroll.has-top::before {
+  opacity: 1;
+}
+
+.sc-discovery-grid-scroll.has-bottom::after {
+  opacity: 1;
+}
+
+.sc-discovery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: .55rem;
+  align-content: start;
+}
+
+.sc-community-card {
+  border: 1px solid var(--border2);
+  border-radius: 12px;
+  background: var(--surface2);
+  color: var(--text);
+  text-align: left;
+  overflow: hidden;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  min-height: 198px;
+  animation: scCardIn .24s ease both;
+}
+
+.sc-community-card:hover {
+  border-color: var(--accent);
+}
+
+.sc-community-card.joined {
+  border-color: rgba(130,74,255,.58);
+}
+
+.sc-community-card-banner {
+  height: 78px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(140deg, rgba(130,74,255,.35), rgba(232,70,10,.28));
+  color: #fff;
+  font-family: 'DM Mono', monospace;
+  font-size: .95rem;
+  font-weight: 700;
+}
+
+.sc-community-card-banner.has-image {
+  background-size: cover;
+  background-position: center;
+}
+
+.sc-community-card-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: .32rem;
+  padding: .55rem .6rem .48rem;
+}
+
+.sc-community-card-main strong {
+  font-size: .8rem;
+}
+
+.sc-community-card-main small {
+  color: var(--text2);
+  font-size: .7rem;
+  line-height: 1.35;
+}
+
+.sc-community-card-main i {
+  color: var(--muted);
+  font-style: normal;
+  font-size: .66rem;
+}
+
+.sc-community-card-cta {
+  border-top: 1px solid var(--border);
+  font-size: .66rem;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--text2);
+  padding: .45rem .6rem;
+}
+
+.sc-community-card.joined .sc-community-card-cta {
+  color: #d6c3ff;
+}
+
+.sc-discovery-sentinel {
+  height: 2px;
+}
+
+@keyframes scCardIn {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .sc-context {
   position: fixed;
   z-index: 120;
@@ -971,7 +1173,12 @@
 
 @media (max-width: 900px) {
   .sc-form-grid.sc-form-grid-2,
-  .sc-check-grid {
+  .sc-check-grid,
+  .sc-hub-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .sc-discovery-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -176,6 +176,10 @@ function parseCommunityEvent(event) {
     .filter((tag) => Array.isArray(tag) && tag[0] === 'p' && String(tag[3] || '').toLowerCase().includes('moder'))
     .map((tag) => String(tag[1] || '').trim())
     .filter(Boolean);
+  const admins = (tags || [])
+    .filter((tag) => Array.isArray(tag) && tag[0] === 'p' && String(tag[3] || '').toLowerCase().includes('admin'))
+    .map((tag) => String(tag[1] || '').trim())
+    .filter(Boolean);
 
   return {
     id,
@@ -187,6 +191,7 @@ function parseCommunityEvent(event) {
     banner: String(firstTagValue(tags, 'banner') || content.banner || ''),
     ownerPubkey: event.pubkey,
     moderatorPubkeys: unique(moderators),
+    adminPubkeys: unique(admins),
     rules: unique([...rulesFromTags, ...rulesFromContent]),
     topics: unique([...topicsFromTags, ...topicsFromContent]),
     joinMode: String(firstTagValue(tags, 'mode') || firstTagValue(tags, 'join') || content.join_mode || (type === 'private' ? 'approval' : 'open')),
@@ -238,12 +243,22 @@ function parseCommunityModerators39003(event) {
 
   const moderators = (tags || [])
     .filter((tag) => Array.isArray(tag) && tag[0] === 'p' && tag[1])
+    .filter((tag) => {
+      const role = String(tag[3] || 'moderator').toLowerCase();
+      return role.includes('moder') || (!role.includes('admin') && !role.includes('owner'));
+    })
+    .map((tag) => String(tag[1] || '').trim())
+    .filter(Boolean);
+  const admins = (tags || [])
+    .filter((tag) => Array.isArray(tag) && tag[0] === 'p' && tag[1])
+    .filter((tag) => String(tag[3] || '').toLowerCase().includes('admin'))
     .map((tag) => String(tag[1] || '').trim())
     .filter(Boolean);
 
   return {
     communityId,
     moderators: unique(moderators),
+    admins: unique(admins),
     source: 'nostr',
     eventId: event.id,
     createdAt: Number(event.created_at || nowSec()) * 1000
@@ -685,7 +700,8 @@ export function createNostrBridge(options = {}) {
     unique(input.topics || []).forEach((topic) => tags.push(['t', String(topic)]));
     unique(input.rules || []).forEach((rule) => tags.push(['rule', String(rule)]));
     unique(input.allowedRelays || []).forEach((relay) => tags.push(['relay', String(relay)]));
-    unique(input.moderators || []).forEach((moderatorPubkey) => tags.push(['p', String(moderatorPubkey), '', 'moderator']));
+    unique([...(input.moderators || []), ...(input.moderatorPubkeys || [])]).forEach((moderatorPubkey) => tags.push(['p', String(moderatorPubkey), '', 'moderator']));
+    unique([...(input.admins || []), ...(input.adminPubkeys || [])]).forEach((adminPubkey) => tags.push(['p', String(adminPubkey), '', 'admin']));
 
     const unsigned = {
       kind,
@@ -760,7 +776,8 @@ export function createNostrBridge(options = {}) {
       ['h', communityId],
       ['client', 'sifaka.live']
     ];
-    unique(input.moderators || []).forEach((moderatorPubkey) => tags.push(['p', String(moderatorPubkey), '', 'moderator']));
+    unique([...(input.moderators || []), ...(input.moderatorPubkeys || [])]).forEach((moderatorPubkey) => tags.push(['p', String(moderatorPubkey), '', 'moderator']));
+    unique([...(input.admins || []), ...(input.adminPubkeys || [])]).forEach((adminPubkey) => tags.push(['p', String(adminPubkey), '', 'admin']));
 
     const unsigned = {
       kind: KIND_GROUP_MODS_39003,

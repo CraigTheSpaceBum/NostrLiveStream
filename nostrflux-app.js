@@ -90,6 +90,8 @@
     playbackToken: 0,
     profileHlsInstance: null,
     profilePlaybackToken: 0,
+    profilePlaybackAddress: '',
+    profilePlaybackUrl: '',
     relayPulseTimer: null,
     followedPubkeys: new Set(),
     contactListPubkeys: new Set(),          // from kind:3 contact list
@@ -1307,8 +1309,9 @@
     const tagMap = parseTags(ev.tags || []);
     const d = firstTag(tagMap, 'd') || ev.id.slice(0, 12);
     const status = (firstTag(tagMap, 'status') || 'live').toLowerCase();
+    const publisherPubkey = normalizePubkeyHex(ev.pubkey) || String(ev.pubkey || '').trim().toLowerCase();
     // NIP-53 address always uses the event publisher's pubkey
-    const address = `${KIND_LIVE_EVENT}:${ev.pubkey}:${d}`;
+    const address = `${KIND_LIVE_EVENT}:${publisherPubkey}:${d}`;
     const starts = Number(firstTag(tagMap, 'starts') || 0) || null;
     const title = firstTag(tagMap, 'title') || (ev.content || '').slice(0, 90) || 'Untitled stream';
     const summary = firstTag(tagMap, 'summary') || ev.content || '';
@@ -1318,23 +1321,24 @@
 
     // NIP-53: platforms (zap.stream, shosho, etc.) publish under their own key
     // but embed the real streamer as ["p", "<pubkey>", "<relay>", "host"].
-    let hostPubkey = ev.pubkey;
+    let hostPubkey = publisherPubkey;
     const platformPubkey_ref = { val: null };
     for (const t of (ev.tags || [])) {
-      if (t[0] === 'p' && t[1] && /^[0-9a-f]{64}$/i.test(t[1])) {
+      const taggedPubkey = normalizePubkeyHex(t && t[1]);
+      if (t[0] === 'p' && taggedPubkey) {
         const role = (t[3] || t[2] || '').toLowerCase().trim();
         if (role === 'host' || role === 'streamer') {
-          hostPubkey = t[1];
-          platformPubkey_ref.val = ev.pubkey;
+          hostPubkey = taggedPubkey;
+          platformPubkey_ref.val = publisherPubkey;
           break;
         }
       }
     }
-    const platformPubkey = platformPubkey_ref.val;
+    const platformPubkey = normalizePubkeyHex(platformPubkey_ref.val || '') || null;
 
     return {
       id: ev.id,
-      pubkey: ev.pubkey,     // event publisher (used for NIP-53 address & ownership)
+      pubkey: publisherPubkey, // event publisher (used for NIP-53 address & ownership)
       hostPubkey,            // actual streamer for display (equals pubkey when self-published)
       platformPubkey,        // non-null when a platform published on behalf of the streamer
       created_at: ev.created_at,
@@ -1356,6 +1360,12 @@
     const raw = (pathname || '/').trim();
     const normalized = raw === '' ? '/' : (raw.replace(/\/+$/, '') || '/');
     return normalized === '/' || normalized.toLowerCase() === '/index.html';
+  }
+
+  function isFaqPath(pathname) {
+    const raw = (pathname || '/').trim();
+    const normalized = raw === '' ? '/' : (raw.replace(/\/+$/, '') || '/');
+    return normalized.toLowerCase() === '/faq';
   }
 
   function restoreRouteFromSpaFallbackQuery() {
@@ -1711,6 +1721,17 @@
     }
   }
 
+  function syncFaqRoute(mode = 'push') {
+    if (!window.history || !window.history.pushState) return;
+    if (isFaqPath(window.location.pathname)) return;
+    const method = mode === 'replace' ? 'replaceState' : 'pushState';
+    try {
+      window.history[method]({ view: 'faq' }, '', '/FAQ');
+    } catch (_) {
+      // ignore
+    }
+  }
+
   function syncTheaterRoute(stream, mode = 'push') {
     if (!stream || !window.history || !window.history.pushState) return;
 
@@ -1794,8 +1815,16 @@
     if (window.showPage) window.showPage('home', { routeMode: 'skip' });
   }
 
+  function showFaqFromRoute() {
+    if (window.showPage) window.showPage('faq', { routeMode: 'skip' });
+  }
+
   async function syncViewFromLocation(opts = {}) {
     const fallbackMode = opts.fallbackMode || 'replace';
+    if (isFaqPath(window.location.pathname)) {
+      showFaqFromRoute();
+      return;
+    }
     const naddr = extractNaddrFromPath(window.location.pathname);
     if (naddr) {
       state.pendingRouteNaddr = naddr;
@@ -3222,7 +3251,8 @@
   }
 
   function renderVideo(stream) {
-    const p = profileFor(stream.hostPubkey);
+    const hostPubkey = normalizePubkeyHex(stream.hostPubkey) || normalizePubkeyHex(stream.pubkey) || stream.hostPubkey || stream.pubkey;
+    const p = profileFor(hostPubkey);
 
     // Title & summary
     const title = qs('.sib-title');
@@ -3230,21 +3260,22 @@
     const summary = qs('.sib-summary');
     if (summary) summary.textContent = stream.summary || 'Live stream.';
 
+    const verifiedNip05 = getVerifiedNip05ForPubkey(hostPubkey, p.nip05 || '');
+    if (!verifiedNip05 && normalizeNip05Value(p.nip05 || '')) ensureNip05Verification(hostPubkey, p.nip05 || '').catch(() => {});
 
     // Host avatar
     const av = qs('.sib-av');
     if (av) {
-      setAvatarEl(av, p.picture || '', pickAvatar(stream.hostPubkey));
-      av.onclick = () => showProfileByPubkey(stream.hostPubkey);
+      setAvatarEl(av, p.picture || '', pickAvatar(hostPubkey));
+      av.classList.toggle('nip05-square', !!verifiedNip05);
+      av.onclick = () => showProfileByPubkey(hostPubkey);
     }
 
     // Host name + nip05
     const name = qs('.sib-name');
-    const verifiedNip05 = getVerifiedNip05ForPubkey(stream.hostPubkey, p.nip05 || '');
-    if (!verifiedNip05 && normalizeNip05Value(p.nip05 || '')) ensureNip05Verification(stream.hostPubkey, p.nip05 || '').catch(() => {});
     if (name) {
       name.innerHTML = '';
-      name.textContent = p.name || shortHex(stream.hostPubkey);
+      name.textContent = p.name || shortHex(hostPubkey);
       if (verifiedNip05) {
         const badge = document.createElement('span');
         badge.className = 'nip05-badge';
@@ -3255,7 +3286,7 @@
       }
     }
     const ident = qs('.sib-identity');
-    if (ident) ident.textContent = verifiedNip05 || shortHex(stream.hostPubkey);
+    if (ident) ident.textContent = verifiedNip05 || shortHex(hostPubkey);
 
     // Hosted-by box: inline in .sib-host-row to the right of .sib-host-info
     let sibHostedBy = qs('.sib-hosted-by');
@@ -3269,7 +3300,7 @@
     sibHostedBy.innerHTML = '';
     if (stream.platformPubkey) {
       const plat = profileFor(stream.platformPubkey);
-      const host = profileFor(stream.hostPubkey);
+      const host = profileFor(hostPubkey);
       const platName = plat.display_name || plat.name || '';
       const hostName = host.display_name || host.name || '';
       if (platName && platName !== hostName) {
@@ -3325,7 +3356,7 @@
     renderStreamReactionsUi(stream);
 
     // Follow/share button state
-    updateTheaterFollowBtn(stream.hostPubkey);
+    updateTheaterFollowBtn(hostPubkey);
     updateTheaterShareBtn(stream);
     refreshOwnStreamBoostState(stream);
 
@@ -5142,8 +5173,10 @@
     window.showVideoPage();
   }
 
-    function clearProfilePlayback() {
+  function clearProfilePlayback() {
     state.profilePlaybackToken += 1;
+    state.profilePlaybackAddress = '';
+    state.profilePlaybackUrl = '';
     if (state.profileHlsInstance) {
       try {
         state.profileHlsInstance.destroy();
@@ -5151,6 +5184,17 @@
         // no-op
       }
       state.profileHlsInstance = null;
+    }
+    const host = qs('#profileLivePlayer');
+    if (host) {
+      host.querySelectorAll('video').forEach((video) => {
+        try {
+          video.pause();
+          video.removeAttribute('src');
+          video.load();
+        } catch (_) {}
+      });
+      host.innerHTML = '';
     }
   }
 
@@ -5181,17 +5225,23 @@
   }
 
   async function renderProfileLivePlayback(stream) {
-    clearProfilePlayback();
-
     const host = qs('#profileLivePlayer');
-    if (!host) return;
-    const url = (stream.streaming || '').trim();
+    if (!host || !stream) return;
+    const address = String(stream.address || '').trim();
+    const url = sanitizeMediaUrl((stream.streaming || '').trim());
+    const existingVideo = host.querySelector('video');
+    const sameSource = !!(address && url && state.profilePlaybackAddress === address && state.profilePlaybackUrl === url);
+    if (sameSource && (existingVideo || state.profileHlsInstance)) return;
+
+    clearProfilePlayback();
 
     if (!url || !/^https?:\/\//i.test(url)) {
       renderProfilePlaybackFallback('Live stream metadata is available, but no browser-playable URL was found.', url);
       return;
     }
 
+    state.profilePlaybackAddress = address;
+    state.profilePlaybackUrl = url;
     const token = state.profilePlaybackToken;
     const video = document.createElement('video');
     video.controls = true;
@@ -5199,12 +5249,13 @@
     video.muted = false;
     video.defaultMuted = false;
     video.playsInline = true;
+    video.preload = 'metadata';
     video.style.cssText = 'width:100%;height:100%;object-fit:cover;background:#000;';
-    host.innerHTML = '';
     host.appendChild(video);
 
     video.addEventListener('error', () => {
       if (token !== state.profilePlaybackToken) return;
+      clearProfilePlayback();
       renderProfilePlaybackFallback('Profile live playback failed in this browser.', url);
     });
 
@@ -5217,20 +5268,28 @@
           const Hls = await ensureHlsJs();
           if (token !== state.profilePlaybackToken) return;
           if (!Hls.isSupported()) {
+            clearProfilePlayback();
             renderProfilePlaybackFallback('HLS is not supported in this browser.', url);
             return;
           }
 
-          const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+          const hls = new Hls({
+            enableWorker: true,
+            lowLatencyMode: true,
+            backBufferLength: 8,
+            maxBufferLength: 14
+          });
           state.profileHlsInstance = hls;
           hls.loadSource(url);
           hls.attachMedia(video);
           hls.on(Hls.Events.ERROR, (_event, data) => {
             if (data && data.fatal && token === state.profilePlaybackToken) {
+              clearProfilePlayback();
               renderProfilePlaybackFallback('HLS playback failed. Open stream directly instead.', url);
             }
           });
         } catch (_) {
+          clearProfilePlayback();
           renderProfilePlaybackFallback('Could not load HLS playback library.', url);
           return;
         }
@@ -5252,8 +5311,15 @@
   }
 
   function getLatestLiveByPubkey(pubkey) {
+    const target = normalizePubkeyHex(pubkey);
+    if (!target) return null;
     return Array.from(state.streamsByAddress.values())
-      .filter((s) => (s.pubkey === pubkey || s.hostPubkey === pubkey) && s.status === 'live')
+      .filter((s) => {
+        if (s.status !== 'live') return false;
+        const eventPubkey = normalizePubkeyHex(s.pubkey);
+        const hostPubkey = normalizePubkeyHex(s.hostPubkey);
+        return eventPubkey === target || hostPubkey === target;
+      })
       .sort((a, b) => (b.created_at || 0) - (a.created_at || 0))[0] || null;
   }
 
@@ -6304,6 +6370,17 @@
     }
   }
 
+  function refreshProfileHeaderStats(pubkey) {
+    const target = normalizePubkeyHex(pubkey);
+    if (!target) return;
+    if (normalizePubkeyHex(state.selectedProfilePubkey) !== target) return;
+    const stats = state.profileStatsByPubkey.get(target) || { followers: 0, following: 0 };
+    const followersEl = qs('#profFollowers');
+    const followingEl = qs('#profFollowing');
+    if (followersEl) followersEl.textContent = formatCount(stats.followers || 0);
+    if (followingEl) followingEl.textContent = formatCount(stats.following || 0);
+  }
+
   function subscribeProfileStats(pubkey) {
     if (!pubkey) return;
     if (state.profileStatsSubId) state.pool.unsubscribe(state.profileStatsSubId);
@@ -6341,7 +6418,7 @@
             following: followingSet.size
           });
 
-          if (state.selectedProfilePubkey === pubkey) renderProfilePage(pubkey);
+          refreshProfileHeaderStats(pubkey);
           // Refresh theater stat if this is the open stream's host
           const openStream = state.selectedStreamAddress && state.streamsByAddress.get(state.selectedStreamAddress);
           if (openStream && openStream.pubkey === pubkey) {
@@ -6354,7 +6431,7 @@
             followers: followerSet.size,
             following: followingSet.size
           });
-          if (state.selectedProfilePubkey === pubkey) renderProfilePage(pubkey);
+          refreshProfileHeaderStats(pubkey);
           const openStream = state.selectedStreamAddress && state.streamsByAddress.get(state.selectedStreamAddress);
           if (openStream && openStream.pubkey === pubkey) {
             const el = qs('#theaterFollowers');
@@ -6426,8 +6503,24 @@
     if (videosEl) videosEl.dataset.mediaLimit = '9';
     if (photosEl) photosEl.dataset.mediaLimit = '18';
 
+    const selectedKey = normalizePubkeyHex(pubkey) || pubkey;
     const existing = state.profileNotesByPubkey.get(pubkey);
     if (!existing) state.profileNotesByPubkey.set(pubkey, new Map());
+    let feedRenderTimer = null;
+    const flushProfileFeedRender = () => {
+      if (feedRenderTimer) {
+        clearTimeout(feedRenderTimer);
+        feedRenderTimer = null;
+      }
+      if ((normalizePubkeyHex(state.selectedProfilePubkey) || state.selectedProfilePubkey) === selectedKey) {
+        renderProfileFeed(pubkey);
+        renderProfileCollections(pubkey);
+      }
+    };
+    const scheduleProfileFeedRender = () => {
+      if (feedRenderTimer) clearTimeout(feedRenderTimer);
+      feedRenderTimer = setTimeout(flushProfileFeedRender, 120);
+    };
 
     state.profileFeedSubId = state.pool.subscribe(
       [
@@ -6442,16 +6535,10 @@
             map.set(ev.id, ev);
             state.profileNotesByPubkey.set(pubkey, map);
           }
-          if (state.selectedProfilePubkey === pubkey) {
-            renderProfileFeed(pubkey);
-            renderProfileCollections(pubkey);
-          }
+          scheduleProfileFeedRender();
         },
         eose: () => {
-          if (state.selectedProfilePubkey === pubkey) {
-            renderProfileFeed(pubkey);
-            renderProfileCollections(pubkey);
-          }
+          flushProfileFeedRender();
         }
       }
     );
@@ -6575,7 +6662,12 @@
       bannerImg.style.display = 'none';
     }
 
-    const userStreams = Array.from(state.streamsByAddress.values()).filter((s) => s.pubkey === pubkey || s.hostPubkey === pubkey);
+    const normalizedProfilePubkey = normalizePubkeyHex(pubkey) || pubkey;
+    const userStreams = Array.from(state.streamsByAddress.values()).filter((s) => {
+      const eventPubkey = normalizePubkeyHex(s.pubkey) || s.pubkey;
+      const hostPubkey = normalizePubkeyHex(s.hostPubkey) || s.hostPubkey;
+      return eventPubkey === normalizedProfilePubkey || hostPubkey === normalizedProfilePubkey;
+    });
     const sinceEl = qs('#profNostrSince');
     const firstSeenTs = estimateProfileFirstSeen(pubkey, p);
     if (sinceEl) sinceEl.textContent = ''; // hidden via CSS; kept for Time on Nostr stat tile
@@ -7423,17 +7515,7 @@
 
       // --- Profile mini-player ---
       if (keep !== 'profile') {
-        const profilePlayer = qs('#profileLivePlayer');
-        if (profilePlayer) {
-          profilePlayer.querySelectorAll('video').forEach((v) => {
-            try { v.pause(); v.src = ''; } catch (_) {}
-          });
-        }
-        if (state.profileHlsInstance) {
-          try { state.profileHlsInstance.destroy(); } catch (_) {}
-          state.profileHlsInstance = null;
-        }
-        state.profilePlaybackToken++;
+        clearProfilePlayback();
       }
     }
 
@@ -7443,12 +7525,15 @@
       const video = qs('#videoPage');
       const profile = qs('#profilePage');
       const communities = qs('#communitiesPage');
+      const faq = qs('#faqPage');
       if (p !== 'video') setActiveViewerAddress('');
       if (p === 'home' && routeMode !== 'skip') syncHomeRoute(routeMode);
+      if (p === 'faq' && routeMode !== 'skip') syncFaqRoute(routeMode);
       if (home) home.classList.toggle('active', p === 'home');
       if (video) video.style.display = 'none';
       if (profile) profile.style.display = 'none';
       if (communities) communities.style.display = p === 'communities' ? 'block' : 'none';
+      if (faq) faq.style.display = p === 'faq' ? 'block' : 'none';
       // Communities/home router behavior:
       // - home keeps hero playback and cycling
       // - all other top-level pages fully stop hero playback
@@ -7476,6 +7561,7 @@
       const video = qs('#videoPage');
       const profile = qs('#profilePage');
       const communities = qs('#communitiesPage');
+      const faq = qs('#faqPage');
       const selected = state.selectedStreamAddress && state.streamsByAddress.get(state.selectedStreamAddress);
       setActiveViewerAddress(selected ? selected.address : '');
       if (selected && routeMode !== 'skip') syncTheaterRoute(selected, routeMode);
@@ -7483,6 +7569,7 @@
       if (video) video.style.display = 'block';
       if (profile) profile.style.display = 'none';
       if (communities) communities.style.display = 'none';
+      if (faq) faq.style.display = 'none';
       // Kill the hero cycle timer completely ? prevents it firing and starting audio behind theater
       stopHeroCycle();
       stopAllAudio('theater');
@@ -7498,11 +7585,13 @@
       const video = qs('#videoPage');
       const profile = qs('#profilePage');
       const communities = qs('#communitiesPage');
+      const faq = qs('#faqPage');
       setActiveViewerAddress('');
       if (home) home.classList.remove('active');
       if (video) video.style.display = 'none';
       if (profile) profile.style.display = 'block';
       if (communities) communities.style.display = 'none';
+      if (faq) faq.style.display = 'none';
       // Kill the hero cycle timer completely ? prevents audio starting behind profile
       stopHeroCycle();
       stopAllAudio('profile');
@@ -8122,8 +8211,12 @@
     window.onbUpdatePreview = onbUpdatePreview;
     window.openStreamFromProfile = openStreamFromProfile;
 
-    window.openFaq = function () { qs('#faqModal').classList.add('open'); };
-    window.closeFaq = function () { qs('#faqModal').classList.remove('open'); };
+    window.openFaq = function () { window.showPage('faq'); };
+    window.closeFaq = function () {
+      const modal = qs('#faqModal');
+      if (modal) modal.classList.remove('open');
+      if (isFaqPath(window.location.pathname)) window.showPage('home');
+    };
     window.toggleFaq = function (el) { el.closest('.faq-item').classList.toggle('open'); };
     window.switchTab = function (t) {
       const isChat = t === 'chat';
@@ -8765,6 +8858,7 @@
       state.user = null; state.authMode = 'readonly'; state.localSecretKey = null;
       state.pendingOnboardingNsec = ''; state.selectedStreamAddress = null;
       state.selectedProfilePubkey = null; state.selectedProfileLiveAddress = null;
+      state.profilePlaybackAddress = ''; state.profilePlaybackUrl = '';
       state.followedPubkeys = new Set(); state.contactListPubkeys = new Set();
       state.contactsLatestCreatedAt = 0; state.contactsContent = '';
       state.contactsPTagByPubkey = new Map(); state.contactsOtherTags = [];
