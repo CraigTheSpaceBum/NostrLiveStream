@@ -1,0 +1,52 @@
+/* Theme overrides for Sifaka Live.
+   Toggle with document.documentElement.dataset.theme = 'light' | 'dark' | 'midnight'. */
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  --bg: #f4f7fb;
+  --surface: #ffffff;
+  --surface2: #f2f6fb;
+  --surface3: #e8eef6;
+  --border: #d7e0ea;
+  --border2: #c8d4e0;
+  --accent: #d44a0e;
+  --accent-glow: rgba(212, 74, 14, 0.2);
+  --live: #d63252;
+  --zap: #c48b10;
+  --zap-dim: rgba(196, 139, 16, 0.15);
+  --text: #13202d;
+  --text2: #445668;
+  --muted: #6a7d90;
+  --green: #0a9f6a;
+  --purple: #6b50b7;
+  --danger: #be2e3a;
+  color-scheme: light;
+}
+
+:root[data-theme='midnight'] {
+  --bg: #05070c;
+  --surface: #0a0f16;
+  --surface2: #101725;
+  --surface3: #172032;
+  --border: #1a2b43;
+  --border2: #23395a;
+  --accent: #ff5b18;
+  --accent-glow: rgba(255, 91, 24, 0.25);
+  --live: #ff4467;
+  --zap: #ffc53a;
+  --zap-dim: rgba(255, 197, 58, 0.16);
+  --text: #e9eef7;
+  --text2: #9fb1c8;
+  --muted: #5d718a;
+  --green: #1ad18c;
+  --purple: #9f7cff;
+  --danger: #ff5460;
+  color-scheme: dark;
+}
+
+html, body {
+  transition: background-color .2s ease, color .2s ease;
+}
