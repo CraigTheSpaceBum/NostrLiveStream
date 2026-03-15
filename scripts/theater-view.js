@@ -1,4 +1,4 @@
-﻿(function () {
+(function () {
   const ns = window.SifakaPageViews = window.SifakaPageViews || {};
 
   ns.showTheaterLayout = function showTheaterLayout(ctx = {}) {
@@ -8,6 +8,8 @@
     const video = qs('#videoPage');
     const profile = qs('#profilePage');
     const communities = qs('#communitiesPage');
+    const messages = qs('#messagesPage');
+    const faq = qs('#faqPage');
 
     const state = ctx.state || {};
     const selected = state.selectedStreamAddress && state.streamsByAddress && state.streamsByAddress.get(state.selectedStreamAddress);
@@ -23,6 +25,8 @@
     if (video) video.style.display = 'block';
     if (profile) profile.style.display = 'none';
     if (communities) communities.style.display = 'none';
+    if (messages) messages.style.display = 'none';
+    if (faq) faq.style.display = 'none';
 
     if (typeof ctx.stopHeroCycle === 'function') ctx.stopHeroCycle();
     if (typeof ctx.stopAllAudio === 'function') ctx.stopAllAudio('theater');
@@ -37,3 +41,4 @@
     if (typeof ctx.scrollToTop === 'function') ctx.scrollToTop();
   };
 })();
+

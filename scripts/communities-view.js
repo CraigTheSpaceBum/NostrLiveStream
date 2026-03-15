@@ -1,30 +1,67 @@
-(function () {
+﻿(function () {
   const ns = window.SifakaPageViews = window.SifakaPageViews || {};
 
   ns.mountCommunities = function mountCommunities() {
-    try {
-      if (window.SifakaCommunities && typeof window.SifakaCommunities.mount === 'function') {
-        window.SifakaCommunities.mount();
-        return Promise.resolve(true);
+    const showFallback = () => {
+      const root = document.getElementById('communitiesRoot');
+      if (!root || root.innerHTML.trim()) return;
+      if (window.location && window.location.protocol === 'file:') {
+        root.innerHTML = '<div class="live-grid-loading" style="padding:1rem;line-height:1.5">Communities could not load in file mode.<br>Run a local server and open http://localhost instead of file://.<br><small>Example: <code>python -m http.server 8080</code></small></div>';
+        return;
       }
-    } catch (err) {
-      console.error('Communities mount failed', err);
-    }
+      root.innerHTML = '<div class="live-grid-loading" style="padding:1rem;">Unable to load Communities right now.</div>';
+    };
 
-    return import('../communities/boot.js')
-      .then(() => {
-        if (window.SifakaCommunities && typeof window.SifakaCommunities.mount === 'function') {
-          window.SifakaCommunities.mount();
-          return true;
-        }
+    const tryMountExisting = () => {
+      if (!window.SifakaCommunities || typeof window.SifakaCommunities.mount !== 'function') return false;
+      try {
+        window.SifakaCommunities.mount();
+        return true;
+      } catch (err) {
+        console.error('Communities mount failed', err);
         return false;
+      }
+    };
+
+    if (tryMountExisting()) return Promise.resolve(true);
+
+    const tryImportAndMount = (specifier) => import(specifier)
+      .then(() => tryMountExisting())
+      .catch(() => false);
+
+    const injectModuleScriptAndMount = () => new Promise((resolve) => {
+      const existing = document.getElementById('sifaka-communities-boot-retry');
+      if (existing) {
+        window.setTimeout(() => resolve(tryMountExisting()), 280);
+        return;
+      }
+      const script = document.createElement('script');
+      script.id = 'sifaka-communities-boot-retry';
+      script.type = 'module';
+      script.src = './communities/boot.js?retry=' + Date.now();
+      script.onload = () => {
+        window.setTimeout(() => resolve(tryMountExisting()), 180);
+      };
+      script.onerror = () => resolve(false);
+      document.body.appendChild(script);
+    });
+
+    return tryImportAndMount('../communities/boot.js')
+      .then((ok) => (ok ? true : tryImportAndMount('./communities/boot.js')))
+      .then((ok) => (ok ? true : injectModuleScriptAndMount()))
+      .then((ok) => {
+        if (ok) return true;
+        return new Promise((resolve) => {
+          window.setTimeout(() => resolve(tryMountExisting()), 250);
+        });
+      })
+      .then((ok) => {
+        if (!ok) showFallback();
+        return !!ok;
       })
       .catch((err) => {
         console.error('Communities module load failed', err);
-        const root = document.getElementById('communitiesRoot');
-        if (root && !root.innerHTML.trim()) {
-          root.innerHTML = '<div class="live-grid-loading" style="padding:1rem;">Unable to load Communities right now.</div>';
-        }
+        showFallback();
         return false;
       });
   };
@@ -54,3 +91,6 @@
     ns.openCommunities({ showPage: window.showPage, document });
   };
 })();
+
+
+

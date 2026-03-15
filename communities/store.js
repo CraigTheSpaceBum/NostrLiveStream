@@ -358,10 +358,7 @@ export function createCommunityStore(options = {}) {
   }
 
   function getVisibleCommunities() {
-    if (state.joinedCommunityIds.size) {
-      return state.data.communities.filter((community) => state.joinedCommunityIds.has(community.id));
-    }
-    return state.data.communities.slice();
+    return state.data.communities.filter((community) => state.joinedCommunityIds.has(community.id));
   }
 
   function ensureActiveSelection() {
@@ -1098,6 +1095,8 @@ export function createCommunityStore(options = {}) {
     const fromStorage = readJoinedFromStorage(next);
     if (fromStorage.length) {
       state.joinedCommunityIds = new Set(fromStorage);
+    } else {
+      state.joinedCommunityIds = new Set();
     }
 
     ensureActiveSelection();
@@ -1168,10 +1167,7 @@ export function createCommunityStore(options = {}) {
   if (joinedFromStorage.length) {
     state.joinedCommunityIds = new Set(joinedFromStorage);
   } else {
-    const inferred = state.data.communities
-      .filter((community) => (state.data.membersByCommunity[community.id] || []).some((member) => member.pubkey === state.currentUserPubkey))
-      .map((community) => community.id);
-    state.joinedCommunityIds = new Set(inferred);
+    state.joinedCommunityIds = new Set();
   }
 
   ensureActiveSelection();
@@ -1224,4 +1220,7 @@ export function createCommunityStore(options = {}) {
     getDiscoverySuggestions
   };
 }
+
+
+
 

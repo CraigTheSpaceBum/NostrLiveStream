@@ -1,4 +1,4 @@
-// Nostr protocol bridge for Communities.
+﻿// Nostr protocol bridge for Communities.
 // Network and signing logic is isolated from UI/store.
 
 const NIP_FLAGS = {
@@ -59,6 +59,13 @@ function randomId(prefix = 'sc') {
 
 function unique(values) {
   return Array.from(new Set((values || []).filter(Boolean)));
+}
+
+function normalizeRelayInput(input) {
+  if (Array.isArray(input)) return input;
+  if (typeof input === 'string') return [input];
+  if (input && typeof input[Symbol.iterator] === 'function') return Array.from(input);
+  return [];
 }
 
 function slugify(input) {
@@ -401,7 +408,7 @@ function buildMessageTags(input = {}) {
 }
 
 export function createNostrBridge(options = {}) {
-  const relays = unique((options.relays || []).map(normalizeRelay).filter(Boolean));
+  const relays = unique(normalizeRelayInput(options.relays).map(normalizeRelay).filter(Boolean));
   const sockets = new Map();
   const subscriptions = new Map();
   const publishQueue = [];
@@ -916,3 +923,4 @@ export function createNostrBridge(options = {}) {
     capabilities
   };
 }
+

@@ -1,14 +1,29 @@
-import { createCommunityStore } from './store.js';
+﻿import { createCommunityStore } from './store.js';
 import { createNostrBridge } from './nostr.js';
 import { createCommunitiesUI } from './ui.js';
 
 let app = null;
 
+function normalizeRelayList(input) {
+  let list = [];
+  if (Array.isArray(input)) list = input.slice();
+  else if (typeof input === 'string') list = [input];
+  else if (input && typeof input[Symbol.iterator] === 'function') list = Array.from(input);
+  return Array.from(new Set(
+    list
+      .map((value) => String(value || '').trim())
+      .filter((value) => /^wss:\/\//i.test(value))
+  ));
+}
 function getContext() {
   const ctx = window.__SIFAKA_CONTEXT || {};
-  const relays = typeof ctx.getRelays === 'function'
-    ? (ctx.getRelays() || [])
+  const relaysRaw = typeof ctx.getRelays === 'function'
+    ? ctx.getRelays()
     : ['wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.snort.social'];
+  const relays = normalizeRelayList(relaysRaw);
+  if (!relays.length) {
+    relays.push('wss://relay.damus.io', 'wss://nos.lol', 'wss://relay.snort.social');
+  }
 
   const user = typeof ctx.getUser === 'function' ? ctx.getUser() : null;
   const userPubkey = user && user.pubkey ? String(user.pubkey) : '';
@@ -61,45 +76,49 @@ function ensureApp() {
 
   function startBridgeSubscriptions() {
     if (graphSub) return;
+    try {
+      offStatus = nostrBridge.on('status', (payload) => {
+        store.setRelayStatus(payload.relay, payload.state);
+      });
 
-    offStatus = nostrBridge.on('status', (payload) => {
-      store.setRelayStatus(payload.relay, payload.state);
-    });
+      graphSub = nostrBridge.subscribeCommunityGraph({
+        onProfile(profile) {
+          store.ingestProfile(profile);
+        },
+        onCommunity(community) {
+          store.ingestCommunity(community);
+        },
+        onCommunityMembers39002(data39002) {
+          store.ingestCommunityMembers(data39002);
+        },
+        onCommunityModerators39003(data39003) {
+          store.ingestCommunityModerators(data39003);
+        },
+        onChannel(channel) {
+          store.ingestChannel(channel);
+        },
+        onMessage(message) {
+          store.ingestMessage(message);
+        },
+        onReaction(reaction) {
+          store.ingestReaction(reaction);
+        },
+        onDeletion(deletion) {
+          store.ingestDeletion(deletion);
+        },
+        onMembershipList(membership) {
+          store.ingestMembershipList(membership);
+        }
+      }, {
+        id: 'sifaka_communities_graph',
+        limit: 700
+      });
 
-    graphSub = nostrBridge.subscribeCommunityGraph({
-      onProfile(profile) {
-        store.ingestProfile(profile);
-      },
-      onCommunity(community) {
-        store.ingestCommunity(community);
-      },
-      onCommunityMembers39002(data39002) {
-        store.ingestCommunityMembers(data39002);
-      },
-      onCommunityModerators39003(data39003) {
-        store.ingestCommunityModerators(data39003);
-      },
-      onChannel(channel) {
-        store.ingestChannel(channel);
-      },
-      onMessage(message) {
-        store.ingestMessage(message);
-      },
-      onReaction(reaction) {
-        store.ingestReaction(reaction);
-      },
-      onDeletion(deletion) {
-        store.ingestDeletion(deletion);
-      },
-      onMembershipList(membership) {
-        store.ingestMembershipList(membership);
-      }
-    }, {
-      id: 'sifaka_communities_graph',
-      limit: 700
-    });
-
-    nostrBridge.connectAll();
+      nostrBridge.connectAll();
+    } catch (err) {
+      console.error('Sifaka Communities relay setup error', err);
+      stopBridgeSubscriptions();
+    }
   }
 
   app = {
@@ -163,3 +182,6 @@ window.SifakaCommunities = {
 window.addEventListener('DOMContentLoaded', () => {
   ensureApp();
 });
+
+
+

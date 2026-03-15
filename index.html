@@ -27,7 +27,7 @@
       <button class="dd-item" onclick="showCommunities();closeAllDD()"><span class="ddi">&#127970;</span>Communities</button>
       <button class="dd-item" onclick="closeAllDD()"><span class="ddi">&#127909;</span>Videos</button>
       <button class="dd-item" onclick="closeAllDD()"><span class="ddi">&#128225;</span>Nostr Feed</button>
-      <button class="dd-item" onclick="closeAllDD()"><span class="ddi">&#128172;</span>Messages</button>
+      <button class="dd-item" onclick="showPage('messages');closeAllDD()"><span class="ddi">&#128172;</span>Messages</button>
       <button class="dd-item" onclick="closeAllDD()"><span class="ddi">&#128279;</span>Relays</button>
       <div class="dd-sep"></div>
       <button class="dd-item" onclick="showPage('faq');closeAllDD()"><span class="ddi">&#10067;</span>FAQ & Help</button>
@@ -657,6 +657,11 @@
 <!-- ========= COMMUNITIES PAGE ========= -->
 <div id="communitiesPage">
   <div id="communitiesRoot"></div>
+</div>
+
+<!-- ========= MESSAGES PAGE ========= -->
+<div id="messagesPage">
+  <div id="messagesRoot"></div>
 </div>
 
 <!-- ========= FAQ PAGE ========= -->

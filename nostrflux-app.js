@@ -1,10 +1,14 @@
-(function () {
+﻿(function () {
   const DEFAULT_RELAYS = [
     'wss://relay.damus.io',
     'wss://nos.lol',
     'wss://relay.snort.social',
     'wss://nostr.wine',
-    'wss://relay.primal.net'
+    'wss://relay.primal.net',
+    'wss://relay.nostr.band',
+    'wss://nostr.fmt.wiz.biz',
+    'wss://offchain.pub',
+    'wss://nostr.mom'
   ];
 
   const KIND_PROFILE = 0;
@@ -13,6 +17,7 @@
   const KIND_REACTION = 7;
   const KIND_LIVE_EVENT = 30311;
   const KIND_LIVE_CHAT = 1311;
+  const KIND_DIRECT_MESSAGE = 4;
   const KIND_ZAP_RECEIPT = 9735;
   const KIND_PROFILE_STATUS = 30315;
   const KIND_PEOPLE_LIST = 30000;   // NIP-51 people list
@@ -23,6 +28,7 @@
   const HLS_JS_SRC = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js';
   const SETTINGS_STORAGE_KEY = 'nostrflux_settings_v1';
   const FOLLOWING_STORAGE_KEY = 'nostrflux_following_pubkeys_v1';
+  const DM_LAST_READ_STORAGE_KEY = 'nostrflux_dm_last_read_v1';
   const HIDDEN_ENDED_STREAMS_STORAGE_KEY = 'nostrflux_hidden_ended_streams_v1';
   const NIP05_LOOKUP_CACHE_TTL_MS = 1000 * 60 * 30;
   const NIP05_LOOKUP_MISS_CACHE_TTL_MS = 1000 * 60 * 3;
@@ -76,6 +82,7 @@
     chatSubId: null,
     profileFeedSubId: null,
     profileStatsSubId: null,
+    profileStatsTargetPubkey: '',
     profileStatusSubId: null,
     nip51SubId: null,
     contactsSubId: null,
@@ -142,6 +149,23 @@
     chatOwnLikeEventByMessageId: new Map(),
     chatMessageEventsById: new Map(),
     chatLikePublishPendingByMessageId: new Set(),
+    _chatProfileSubId: null,
+    _chatProfileFetchTimer: null,
+    _chatProfileEoseTimer: null,
+    dmSubId: null,
+    dmOwnerPubkey: '',
+    dmMessagesByPeer: new Map(),
+    dmEventIds: new Set(),
+    dmDecryptPendingIds: new Set(),
+    dmLastReadByPeer: new Map(),
+    dmActivePeerPubkey: '',
+    dmSearchTerm: '',
+    dmDraftByPeer: new Map(),
+    dmSendPending: false,
+    dmListSelection: 'following',
+    dmListActionPending: false,
+    dmStatus: '',
+    dmStatusMode: 'info',
     postReactionPublishPendingByNoteAndKey: new Set(),
     postBoostPublishPendingByNoteId: new Set(),
     reactionPickerTarget: null,
@@ -761,7 +785,7 @@
     state.settings.relays.forEach((relay) => {
       const tag = document.createElement('div');
       tag.className = 'relay-tag';
-      tag.innerHTML = `${relay} <button class="rem" title="Remove">×</button>`;
+      tag.innerHTML = `${relay} <button class="rem" title="Remove">Ã—</button>`;
       const btn = qs('.rem', tag);
       if (btn) btn.addEventListener('click', () => removeRelayFromSettings(relay));
       wrap.appendChild(tag);
@@ -884,12 +908,25 @@
 
     if (state.selectedStreamAddress) {
       const current = state.streamsByAddress.get(state.selectedStreamAddress);
-      if (current) subscribeChat(current);
+      if (current) {
+        subscribeChat(current);
+        if (isVideoPageVisible()) {
+          const statsTargetPubkey = normalizePubkeyHex(current.hostPubkey || '') || normalizePubkeyHex(current.pubkey || '');
+          if (statsTargetPubkey) subscribeProfileStats(statsTargetPubkey);
+        }
+      }
     }
 
     if (state.selectedProfilePubkey) {
       subscribeProfileFeed(state.selectedProfilePubkey);
-      subscribeProfileStats(state.selectedProfilePubkey);
+      if (!isVideoPageVisible()) subscribeProfileStats(state.selectedProfilePubkey);
+    }
+
+    // Relay pool was rebuilt; force DM subscription to be recreated on the new pool.
+    state.dmSubId = null;
+    if (isMessagesPageVisible() && state.user) {
+      ensureMessagesSession({ subscribe: true });
+      renderMessagesPage({ subscribe: true });
     }
 
     if (state.relayPulseTimer) clearInterval(state.relayPulseTimer);
@@ -1368,6 +1405,13 @@
     return normalized.toLowerCase() === '/faq';
   }
 
+  function isMessagesPath(pathname) {
+    const raw = (pathname || '/').trim();
+    const normalized = raw === '' ? '/' : (raw.replace(/\/+$/, '') || '/');
+    return normalized.toLowerCase() === '/messages';
+  }
+
+
   function restoreRouteFromSpaFallbackQuery() {
     if (!window.location || !window.history || !window.history.replaceState) return;
     let params = null;
@@ -1440,12 +1484,23 @@
   }
 
   function normalizeNip05Value(value) {
-    const raw = (value || '').trim().toLowerCase();
+    let raw = (value || '').trim().toLowerCase();
     if (!raw || raw.includes('/')) return '';
-    const parts = raw.split('@');
-    if (parts.length !== 2) return '';
-    const localPart = (parts[0] || '').trim();
-    const domain = (parts[1] || '').trim();
+    if (raw.startsWith('@')) raw = raw.slice(1);
+
+    let localPart = '';
+    let domain = '';
+    if (raw.includes('@')) {
+      const parts = raw.split('@');
+      if (parts.length !== 2) return '';
+      localPart = (parts[0] || '').trim();
+      domain = (parts[1] || '').trim();
+    } else {
+      // Accept domain-only form and map to _@domain (common NIP-05 shorthand).
+      localPart = '_';
+      domain = raw;
+    }
+
     if (!localPart || !domain || !domain.includes('.')) return '';
     if (!/^[a-z0-9._+-]+$/i.test(localPart)) return '';
     if (!/^[a-z0-9.-]+$/i.test(domain)) return '';
@@ -1537,6 +1592,12 @@
       chatEl.querySelectorAll(`.cmsg[data-pubkey="${escaped}"] .c-av`).forEach((el) => {
         el.classList.toggle('nip05-square', verified);
       });
+    }
+
+    if (isMessagesPageVisible()) {
+      renderDmContactSelect();
+      renderDmConversationList();
+      if (normalizePubkeyHex(state.dmActivePeerPubkey) === normalized) renderDmThread();
     }
   }
 
@@ -1731,6 +1792,16 @@
       // ignore
     }
   }
+  function syncMessagesRoute(mode = 'push') {
+    if (!window.history || !window.history.pushState) return;
+    if (isMessagesPath(window.location.pathname)) return;
+    const method = mode === 'replace' ? 'replaceState' : 'pushState';
+    try {
+      window.history[method]({ view: 'messages' }, '', '/messages');
+    } catch (_) {
+      // ignore
+    }
+  }
 
   function syncTheaterRoute(stream, mode = 'push') {
     if (!stream || !window.history || !window.history.pushState) return;
@@ -1819,10 +1890,18 @@
     if (window.showPage) window.showPage('faq', { routeMode: 'skip' });
   }
 
+  function showMessagesFromRoute() {
+    if (window.showPage) window.showPage('messages', { routeMode: 'skip' });
+  }
+
   async function syncViewFromLocation(opts = {}) {
     const fallbackMode = opts.fallbackMode || 'replace';
     if (isFaqPath(window.location.pathname)) {
       showFaqFromRoute();
+      return;
+    }
+    if (isMessagesPath(window.location.pathname)) {
+      showMessagesFromRoute();
       return;
     }
     const naddr = extractNaddrFromPath(window.location.pathname);
@@ -1859,6 +1938,1590 @@
 
     if (!isHomePath(window.location.pathname) && fallbackMode !== 'skip') syncHomeRoute(fallbackMode);
     showHomeFromRoute();
+  }
+
+  function isMessagesPageVisible() {
+    const page = qs('#messagesPage');
+    if (!page) return false;
+    if (window.getComputedStyle) {
+      try {
+        return window.getComputedStyle(page).display !== 'none';
+      } catch (_) {
+        // ignore
+      }
+    }
+    return page.style.display !== 'none';
+  }
+
+  function isVideoPageVisible() {
+    const page = qs('#videoPage');
+    if (!page) return false;
+    if (window.getComputedStyle) {
+      try {
+        return window.getComputedStyle(page).display !== 'none';
+      } catch (_) {
+        // ignore
+      }
+    }
+    return page.style.display !== 'none';
+  }
+
+  function dmSortComparator(a, b) {
+    const at = Number(a && a.created_at || 0);
+    const bt = Number(b && b.created_at || 0);
+    if (at !== bt) return at - bt;
+    return String(a && a.id || '').localeCompare(String(b && b.id || ''));
+  }
+
+  function updateDmStatusUi() {
+    const statusEl = qs('#dmStatusText');
+    if (!statusEl) return;
+    statusEl.textContent = String(state.dmStatus || '').trim();
+    statusEl.classList.remove('error', 'success');
+    if (state.dmStatusMode === 'error') statusEl.classList.add('error');
+    if (state.dmStatusMode === 'success') statusEl.classList.add('success');
+  }
+
+  function setDmStatus(message, mode = 'info') {
+    state.dmStatus = String(message || '').trim();
+    state.dmStatusMode = mode === 'error' ? 'error' : (mode === 'success' ? 'success' : 'info');
+    updateDmStatusUi();
+  }
+
+  function teardownDmSubscription() {
+    if (state.dmSubId && state.pool) {
+      try { state.pool.unsubscribe(state.dmSubId); } catch (_) {}
+    }
+    state.dmSubId = null;
+    state.dmDecryptPendingIds = new Set();
+  }
+
+  function clearDmState(opts = {}) {
+    const keepLastRead = !!opts.keepLastRead;
+    teardownDmSubscription();
+    state.dmOwnerPubkey = '';
+    state.dmMessagesByPeer = new Map();
+    state.dmEventIds = new Set();
+    state.dmActivePeerPubkey = '';
+    state.dmSearchTerm = '';
+    state.dmDraftByPeer = new Map();
+    state.dmSendPending = false;
+    state.dmStatus = '';
+    state.dmStatusMode = 'info';
+    if (!keepLastRead) state.dmLastReadByPeer = new Map();
+  }
+
+  function dmLastReadStorageKeyFor(ownerPubkey) {
+    const owner = normalizePubkeyHex(ownerPubkey);
+    if (!owner) return '';
+    return `${DM_LAST_READ_STORAGE_KEY}:${owner}`;
+  }
+
+  function loadDmLastReadForOwner(ownerPubkey) {
+    state.dmLastReadByPeer = new Map();
+    const key = dmLastReadStorageKeyFor(ownerPubkey);
+    if (!key) return;
+    try {
+      const raw = localStorage.getItem(key);
+      const parsed = raw ? JSON.parse(raw) : {};
+      if (!parsed || typeof parsed !== 'object') return;
+      Object.keys(parsed).forEach((peerRaw) => {
+        const peer = normalizePubkeyHex(peerRaw);
+        const ts = Number(parsed[peerRaw] || 0);
+        if (!peer || !Number.isFinite(ts) || ts <= 0) return;
+        state.dmLastReadByPeer.set(peer, Math.floor(ts));
+      });
+    } catch (_) {
+      state.dmLastReadByPeer = new Map();
+    }
+  }
+
+  function persistDmLastReadForOwner() {
+    const key = dmLastReadStorageKeyFor(state.dmOwnerPubkey);
+    if (!key) return;
+    const payload = {};
+    state.dmLastReadByPeer.forEach((ts, peer) => {
+      const val = Number(ts || 0);
+      if (!Number.isFinite(val) || val <= 0) return;
+      payload[peer] = Math.floor(val);
+    });
+    try {
+      localStorage.setItem(key, JSON.stringify(payload));
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  function getDmPeerFromEvent(ev, ownerPubkey) {
+    if (!ev || Number(ev.kind || 0) !== KIND_DIRECT_MESSAGE) return '';
+    const owner = normalizePubkeyHex(ownerPubkey);
+    const author = normalizePubkeyHex(ev.pubkey);
+    if (!owner || !author) return '';
+
+    const pTags = allTagValues(ev.tags || [], 'p')
+      .map((v) => normalizePubkeyHex(v))
+      .filter((v) => !!v);
+
+    if (author === owner) {
+      const taggedPeer = pTags.find((pk) => pk !== owner);
+      return taggedPeer || '';
+    }
+    if (pTags.includes(owner)) return author;
+    return '';
+  }
+
+  function upsertDmMessageFromEvent(ev, ownerPubkey) {
+    if (!ev || !ev.id || Number(ev.kind || 0) !== KIND_DIRECT_MESSAGE) return null;
+    if (state.dmEventIds.has(ev.id)) return null;
+
+    const owner = normalizePubkeyHex(ownerPubkey);
+    const peer = getDmPeerFromEvent(ev, owner);
+    if (!owner || !peer) return null;
+
+    state.dmEventIds.add(ev.id);
+
+    const mine = normalizePubkeyHex(ev.pubkey) === owner;
+    const message = {
+      id: ev.id,
+      peerPubkey: peer,
+      mine,
+      pubkey: normalizePubkeyHex(ev.pubkey) || '',
+      created_at: Number(ev.created_at || Math.floor(Date.now() / 1000)),
+      ciphertext: String(ev.content || ''),
+      content: '',
+      decrypted: false,
+      decryptError: false
+    };
+
+    const messages = state.dmMessagesByPeer.get(peer) || [];
+    if (messages.some((m) => m.id === message.id)) return null;
+    messages.push(message);
+    messages.sort(dmSortComparator);
+    state.dmMessagesByPeer.set(peer, messages);
+    return message;
+  }
+
+  function getDmUnreadCountForPeer(peerPubkey) {
+    const peer = normalizePubkeyHex(peerPubkey);
+    if (!peer) return 0;
+    const messages = state.dmMessagesByPeer.get(peer) || [];
+    if (!messages.length) return 0;
+    const lastRead = Number(state.dmLastReadByPeer.get(peer) || 0);
+    return messages.filter((msg) => !msg.mine && Number(msg.created_at || 0) > lastRead).length;
+  }
+
+  function markDmPeerRead(peerPubkey) {
+    const peer = normalizePubkeyHex(peerPubkey);
+    if (!peer) return;
+    const messages = state.dmMessagesByPeer.get(peer) || [];
+    if (!messages.length) return;
+    let newestIncomingTs = 0;
+    messages.forEach((msg) => {
+      if (msg.mine) return;
+      const ts = Number(msg.created_at || 0);
+      if (ts > newestIncomingTs) newestIncomingTs = ts;
+    });
+    if (!newestIncomingTs) return;
+    const current = Number(state.dmLastReadByPeer.get(peer) || 0);
+    if (newestIncomingTs <= current) return;
+    state.dmLastReadByPeer.set(peer, newestIncomingTs);
+    persistDmLastReadForOwner();
+  }
+
+  function dmDisplayNameForPeer(peerPubkey) {
+    const peer = normalizePubkeyHex(peerPubkey);
+    if (!peer) return 'Unknown';
+    const profile = profileFor(peer);
+    const preferred = String(profile.display_name || profile.name || '').trim();
+    return preferred || shortHex(peer);
+  }
+
+  function dmDisplaySublineForPeer(peerPubkey) {
+    const peer = normalizePubkeyHex(peerPubkey);
+    if (!peer) return '';
+    const profile = profileFor(peer);
+    const claimedNip05 = normalizeNip05Value(profile.nip05 || '');
+    const verifiedNip05 = getVerifiedNip05ForPubkey(peer, claimedNip05);
+    if (claimedNip05 && !verifiedNip05) ensureNip05Verification(peer, claimedNip05).catch(() => {});
+    if (verifiedNip05) return verifiedNip05;
+    const npub = formatNpubForDisplay(peer);
+    if (npub.startsWith('npub1') && npub.length > 28) return `${npub.slice(0, 16)}...${npub.slice(-8)}`;
+    return npub || shortHex(peer);
+  }
+
+  function dmMessagePreview(message) {
+    if (!message) return 'No messages yet';
+    if (message.decryptError) return 'Encrypted message (cannot decrypt with current signer)';
+    if (!message.decrypted) return 'Decrypting encrypted message...';
+    const val = String(message.content || '').trim();
+    return val || '[empty message]';
+  }
+
+  function dmContactOptionLabel(peerPubkey) {
+    const peer = normalizePubkeyHex(peerPubkey);
+    if (!peer) return 'Unknown';
+    const profile = profileFor(peer);
+    const claimedNip05 = normalizeNip05Value(profile.nip05 || '');
+    const verifiedNip05 = getVerifiedNip05ForPubkey(peer, claimedNip05);
+    if (claimedNip05 && !verifiedNip05) ensureNip05Verification(peer, claimedNip05).catch(() => {});
+    const name = dmDisplayNameForPeer(peer);
+    const suffix = verifiedNip05 || shortHex(peer);
+    return `${name} - ${suffix}`;
+  }
+
+  function getDmOwnedPeopleLists() {
+    const owner = normalizePubkeyHex(state.user && state.user.pubkey || '');
+    if (!owner) return [];
+    return Array.from(state.nip51Lists.values())
+      .filter((list) => normalizePubkeyHex(list && list.pubkey || '') === owner)
+      .sort((a, b) => String(a && a.name || '').localeCompare(String(b && b.name || '')));
+  }
+
+  function getDmListSelectionOptions() {
+    const owner = normalizePubkeyHex(state.user && state.user.pubkey || '');
+    if (!owner) return [];
+
+    const followingSource = new Set([
+      ...Array.from(state.contactListPubkeys || []),
+      ...Array.from(state.followedPubkeys || [])
+    ]);
+    const followingPeers = Array.from(followingSource)
+      .map((pk) => normalizePubkeyHex(pk))
+      .filter((pk) => !!pk && pk !== owner);
+    const out = [{
+      value: 'following',
+      label: `Following (${followingPeers.length})`,
+      type: 'following'
+    }];
+
+    getDmOwnedPeopleLists().forEach((list) => {
+      const count = Array.from(new Set((list && list.pubkeys || [])
+        .map((pk) => normalizePubkeyHex(pk))
+        .filter((pk) => !!pk && pk !== owner))).length;
+      out.push({
+        value: `list:${list.id}`,
+        label: `${String(list && list.name || 'NIP-51 list').trim() || 'NIP-51 list'} (${count})`,
+        type: 'nip51',
+        listId: list.id
+      });
+    });
+    return out;
+  }
+
+  function ensureDmListSelection() {
+    const options = getDmListSelectionOptions();
+    if (!options.length) {
+      state.dmListSelection = '';
+      return '';
+    }
+    const valid = new Set(options.map((opt) => opt.value));
+    if (!valid.has(state.dmListSelection)) state.dmListSelection = options[0].value;
+    return state.dmListSelection;
+  }
+
+  function getDmSelectedListContext() {
+    const owner = normalizePubkeyHex(state.user && state.user.pubkey || '');
+    if (!owner) return null;
+    const selected = ensureDmListSelection();
+    if (!selected) return null;
+
+    if (selected === 'following') {
+      const followingSource = new Set([
+        ...Array.from(state.contactListPubkeys || []),
+        ...Array.from(state.followedPubkeys || [])
+      ]);
+      const pubkeys = Array.from(followingSource)
+        .map((pk) => normalizePubkeyHex(pk))
+        .filter((pk) => !!pk && pk !== owner);
+      return {
+        type: 'following',
+        value: 'following',
+        name: 'Following',
+        list: null,
+        editable: false,
+        pubkeys
+      };
+    }
+
+    if (selected.startsWith('list:')) {
+      const listId = selected.slice(5);
+      const list = state.nip51Lists.get(listId);
+      if (!list) return null;
+      const pubkeys = Array.from(new Set((list.pubkeys || [])
+        .map((pk) => normalizePubkeyHex(pk))
+        .filter((pk) => !!pk && pk !== owner)));
+      return {
+        type: 'nip51',
+        value: selected,
+        name: String(list.name || '').trim() || 'NIP-51 list',
+        list,
+        editable: true,
+        pubkeys
+      };
+    }
+
+    return null;
+  }
+
+  function getDmSelectedListMembers(context) {
+    const target = context || getDmSelectedListContext();
+    if (!target) return [];
+    return Array.from(new Set(target.pubkeys || []))
+      .sort((a, b) => dmDisplayNameForPeer(a).localeCompare(dmDisplayNameForPeer(b)));
+  }
+
+  function setDmListEditorMode(mode = '') {
+    const normalized = mode === 'create' ? 'create' : (mode === 'rename' ? 'rename' : '');
+    const createRow = qs('#dmListCreateRow');
+    const renameRow = qs('#dmListRenameRow');
+    if (createRow) createRow.style.display = normalized === 'create' ? 'flex' : 'none';
+    if (renameRow) renameRow.style.display = normalized === 'rename' ? 'flex' : 'none';
+
+    if (normalized === 'create') {
+      const input = qs('#dmListCreateInput');
+      if (input) {
+        input.value = '';
+        try { input.focus(); } catch (_) {}
+      }
+    } else if (normalized === 'rename') {
+      const context = getDmSelectedListContext();
+      const input = qs('#dmListRenameInput');
+      if (input) {
+        input.value = context && context.type === 'nip51' ? (context.list.name || '') : '';
+        try { input.focus(); } catch (_) {}
+      }
+    }
+  }
+
+  function buildDmPeopleListTags(list, nextName, nextPubkeys) {
+    const tags = [];
+    if (list && list.d) tags.push(['d', list.d]);
+    const cleanedName = String(nextName || '').trim();
+    if (cleanedName) tags.push(['name', cleanedName]);
+    Array.from(new Set((nextPubkeys || [])
+      .map((pk) => normalizePubkeyHex(pk))
+      .filter(Boolean)))
+      .forEach((pk) => tags.push(['p', pk]));
+    return tags;
+  }
+
+  async function publishDmPeopleListUpdate(list, opts = {}) {
+    if (!list || !list.d) throw new Error('List is missing its identifier.');
+    if (!state.user) throw new Error('Please login first.');
+    const owner = normalizePubkeyHex(state.user.pubkey || '');
+    if (!owner) throw new Error('Please login first.');
+    if (normalizePubkeyHex(list.pubkey || '') !== owner) {
+      throw new Error('You can only edit your own lists.');
+    }
+
+    const name = String(opts.name != null ? opts.name : list.name || '').trim() || 'NIP-51 list';
+    const pubkeys = Array.from(new Set((opts.pubkeys != null ? opts.pubkeys : list.pubkeys || [])
+      .map((pk) => normalizePubkeyHex(pk))
+      .filter((pk) => !!pk && pk !== owner)));
+    const tags = buildDmPeopleListTags(list, name, pubkeys);
+    if (!tags.some((t) => t[0] === 'd')) tags.push(['d', list.d]);
+
+    state.dmListActionPending = true;
+    renderDmListPanel();
+    try {
+      const ev = await signAndPublish(KIND_PEOPLE_LIST, '', tags);
+      const merged = {
+        ...list,
+        name,
+        pubkeys,
+        eventId: ev && ev.id ? ev.id : (list.eventId || ''),
+        created_at: Number(ev && ev.created_at || Math.floor(Date.now() / 1000))
+      };
+      state.nip51Lists.set(list.id, merged);
+      renderListFilterDD();
+      renderFollowingCount();
+      renderLiveGrid();
+      return merged;
+    } finally {
+      state.dmListActionPending = false;
+      renderDmListPanel();
+    }
+  }
+
+  async function createDmPeopleList(nameInput) {
+    if (!state.user) {
+      window.openLogin();
+      return null;
+    }
+    const name = String(nameInput || '').trim();
+    if (!name) throw new Error('List name is required.');
+    const owner = normalizePubkeyHex(state.user.pubkey || '');
+    if (!owner) throw new Error('Please login first.');
+    const d = `dm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const list = {
+      id: `${KIND_PEOPLE_LIST}:${owner}:${d}`,
+      name,
+      pubkeys: [],
+      kind: KIND_PEOPLE_LIST,
+      d,
+      pubkey: owner,
+      eventId: '',
+      created_at: 0
+    };
+    const created = await publishDmPeopleListUpdate(list, { name, pubkeys: [] });
+    state.dmListSelection = `list:${created.id}`;
+    setDmStatus(`Created list "${created.name}".`, 'success');
+    renderDmListPanel();
+    return created;
+  }
+
+  async function renameDmSelectedPeopleList(nextNameInput) {
+    const context = getDmSelectedListContext();
+    if (!context || context.type !== 'nip51' || !context.list) {
+      throw new Error('Select one of your NIP-51 lists first.');
+    }
+    const nextName = String(nextNameInput || '').trim();
+    if (!nextName) throw new Error('List name is required.');
+    const updated = await publishDmPeopleListUpdate(context.list, { name: nextName });
+    setDmStatus(`Renamed list to "${updated.name}".`, 'success');
+    renderDmListPanel();
+  }
+
+  async function deleteDmSelectedPeopleList() {
+    const context = getDmSelectedListContext();
+    if (!context || context.type !== 'nip51' || !context.list) {
+      throw new Error('Select one of your NIP-51 lists first.');
+    }
+    if (!state.user) throw new Error('Please login first.');
+    const owner = normalizePubkeyHex(state.user.pubkey || '');
+    if (!owner) throw new Error('Please login first.');
+
+    const list = context.list;
+    state.dmListActionPending = true;
+    renderDmListPanel();
+    try {
+      const tags = [['a', `${KIND_PEOPLE_LIST}:${owner}:${list.d}`], ['k', `${KIND_PEOPLE_LIST}`], ['d', list.d]];
+      if (list.eventId) tags.push(['e', list.eventId]);
+      await signAndPublish(KIND_DELETION, `Deleted people list ${list.name || list.d}`, tags);
+      state.nip51Lists.delete(list.id);
+      state.dmListSelection = 'following';
+      setDmStatus(`Deleted list "${list.name || 'NIP-51 list'}".`, 'success');
+      renderListFilterDD();
+      renderLiveGrid();
+    } finally {
+      state.dmListActionPending = false;
+      renderDmListPanel();
+    }
+  }
+
+  async function addPeerToDmSelectedList(peerPubkey) {
+    const peer = normalizePubkeyHex(peerPubkey);
+    if (!peer) throw new Error('Could not resolve that account.');
+    if (!state.user) throw new Error('Please login first.');
+    const owner = normalizePubkeyHex(state.user.pubkey || '');
+    if (!owner) throw new Error('Please login first.');
+    if (peer === owner) throw new Error('You cannot add your own account.');
+
+    const context = getDmSelectedListContext();
+    if (!context) throw new Error('Select a list first.');
+
+    if (context.type === 'following') {
+      if (state.followedPubkeys.has(peer)) {
+        setDmStatus('That account is already in Following.', 'info');
+        return;
+      }
+      const prevFollowed = new Set(state.followedPubkeys);
+      const prevContacts = new Set(state.contactListPubkeys);
+      state.dmListActionPending = true;
+      renderDmListPanel();
+      try {
+        state.followedPubkeys.add(peer);
+        state.contactListPubkeys.add(peer);
+        persistFollowedPubkeys();
+        await publishFollowedPubkeysToNostr();
+        renderFollowingCount();
+        renderListFilterDD();
+        renderLiveGrid();
+        setDmStatus('Added account to Following.', 'success');
+      } catch (err) {
+        state.followedPubkeys = prevFollowed;
+        state.contactListPubkeys = prevContacts;
+        persistFollowedPubkeys();
+        renderFollowingCount();
+        renderListFilterDD();
+        renderLiveGrid();
+        throw err;
+      } finally {
+        state.dmListActionPending = false;
+        renderDmListPanel();
+      }
+      return;
+    }
+
+    if (context.type === 'nip51' && context.list) {
+      const already = (context.list.pubkeys || []).some((pk) => normalizePubkeyHex(pk) === peer);
+      if (already) {
+        setDmStatus('That account is already in this list.', 'info');
+        return;
+      }
+      await publishDmPeopleListUpdate(context.list, { pubkeys: [...(context.list.pubkeys || []), peer] });
+      setDmStatus('Added account to list.', 'success');
+      return;
+    }
+
+    throw new Error('Selected list is not editable.');
+  }
+
+  async function removePeerFromDmSelectedList(peerPubkey) {
+    const peer = normalizePubkeyHex(peerPubkey);
+    if (!peer) throw new Error('Missing account pubkey.');
+    if (!state.user) throw new Error('Please login first.');
+
+    const context = getDmSelectedListContext();
+    if (!context) throw new Error('Select a list first.');
+
+    if (context.type === 'following') {
+      if (!state.followedPubkeys.has(peer) && !state.contactListPubkeys.has(peer)) return;
+      const prevFollowed = new Set(state.followedPubkeys);
+      const prevContacts = new Set(state.contactListPubkeys);
+      state.dmListActionPending = true;
+      renderDmListPanel();
+      try {
+        state.followedPubkeys.delete(peer);
+        state.contactListPubkeys.delete(peer);
+        persistFollowedPubkeys();
+        await publishFollowedPubkeysToNostr();
+        renderFollowingCount();
+        renderListFilterDD();
+        renderLiveGrid();
+        setDmStatus('Removed account from Following.', 'success');
+      } catch (err) {
+        state.followedPubkeys = prevFollowed;
+        state.contactListPubkeys = prevContacts;
+        persistFollowedPubkeys();
+        renderFollowingCount();
+        renderListFilterDD();
+        renderLiveGrid();
+        throw err;
+      } finally {
+        state.dmListActionPending = false;
+        renderDmListPanel();
+      }
+      return;
+    }
+
+    if (context.type === 'nip51' && context.list) {
+      const nextPubkeys = (context.list.pubkeys || []).filter((pk) => normalizePubkeyHex(pk) !== peer);
+      await publishDmPeopleListUpdate(context.list, { pubkeys: nextPubkeys });
+      setDmStatus('Removed account from list.', 'success');
+      return;
+    }
+
+    throw new Error('Selected list is not editable.');
+  }
+
+  function renderDmListPanel() {
+    const select = qs('#dmListSelect');
+    const membersEl = qs('#dmListMembers');
+    const addInput = qs('#dmListAddInput');
+    const addBtn = qs('#dmListAddBtn');
+    const createBtn = qs('#dmListCreateBtn');
+    const renameBtn = qs('#dmListRenameBtn');
+    const deleteBtn = qs('#dmListDeleteBtn');
+    const createInput = qs('#dmListCreateInput');
+    const createSaveBtn = qs('#dmListCreateSaveBtn');
+    const createCancelBtn = qs('#dmListCreateCancelBtn');
+    const renameInput = qs('#dmListRenameInput');
+    const renameSaveBtn = qs('#dmListRenameSaveBtn');
+    const renameCancelBtn = qs('#dmListRenameCancelBtn');
+    const metaEl = qs('#dmListMeta');
+    if (!select && !membersEl) return;
+
+    const options = getDmListSelectionOptions();
+    ensureDmListSelection();
+
+    if (select) {
+      const prev = String(select.value || '');
+      select.innerHTML = '';
+      if (!options.length) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'No lists available';
+        select.appendChild(opt);
+        select.disabled = true;
+      } else {
+        options.forEach((optData) => {
+          const opt = document.createElement('option');
+          opt.value = optData.value;
+          opt.textContent = optData.label;
+          select.appendChild(opt);
+        });
+        select.disabled = false;
+        const targetVal = options.some((opt) => opt.value === prev) ? prev : state.dmListSelection;
+        select.value = targetVal || options[0].value;
+        state.dmListSelection = select.value || '';
+      }
+    }
+
+    const context = getDmSelectedListContext();
+    const members = getDmSelectedListMembers(context);
+    if (metaEl) {
+      if (!context) metaEl.textContent = 'Create a list, or use Following to manage your contacts.';
+      else if (context.type === 'following') metaEl.textContent = `${members.length} account${members.length === 1 ? '' : 's'} in Following (kind:3).`;
+      else metaEl.textContent = `${members.length} account${members.length === 1 ? '' : 's'} in ${context.name}.`;
+    }
+
+    if (createBtn) createBtn.disabled = !!state.dmListActionPending;
+    if (renameBtn) renameBtn.disabled = !!state.dmListActionPending || !context || context.type !== 'nip51';
+    if (deleteBtn) deleteBtn.disabled = !!state.dmListActionPending || !context || context.type !== 'nip51';
+    if (createInput) createInput.disabled = !!state.dmListActionPending;
+    if (createSaveBtn) createSaveBtn.disabled = !!state.dmListActionPending;
+    if (createCancelBtn) createCancelBtn.disabled = !!state.dmListActionPending;
+    if (renameInput) renameInput.disabled = !!state.dmListActionPending || !context || context.type !== 'nip51';
+    if (renameSaveBtn) renameSaveBtn.disabled = !!state.dmListActionPending || !context || context.type !== 'nip51';
+    if (renameCancelBtn) renameCancelBtn.disabled = !!state.dmListActionPending;
+    if (addInput) addInput.disabled = !!state.dmListActionPending || !context;
+    if (addBtn) addBtn.disabled = !!state.dmListActionPending || !context;
+    if (addInput) {
+      addInput.placeholder = context
+        ? 'Add by npub, nip-05, nprofile, or hex pubkey'
+        : 'Select or create a list first';
+    }
+
+    const renameRow = qs('#dmListRenameRow');
+    if (renameRow && renameRow.style.display === 'flex' && (!context || context.type !== 'nip51')) {
+      setDmListEditorMode('');
+    }
+
+    if (!membersEl) return;
+    membersEl.innerHTML = '';
+    if (!context) {
+      const empty = document.createElement('div');
+      empty.className = 'dm-empty';
+      empty.innerHTML = '<strong>No contact list selected</strong>Create a NIP-51 list to organize people, or use Following.';
+      membersEl.appendChild(empty);
+      return;
+    }
+
+    if (!members.length) {
+      const empty = document.createElement('div');
+      empty.className = 'dm-empty';
+      empty.innerHTML = `<strong>${context.name} is empty</strong>Add someone with npub, NIP-05, nprofile, or hex pubkey.`;
+      membersEl.appendChild(empty);
+      return;
+    }
+
+    members.forEach((peer) => {
+      if (!state.profilesByPubkey.has(peer)) fetchProfileIfNeeded(peer);
+      const profile = profileFor(peer);
+      const claimedNip05 = normalizeNip05Value(profile.nip05 || '');
+      const verifiedNip05 = getVerifiedNip05ForPubkey(peer, claimedNip05);
+      if (claimedNip05 && !verifiedNip05) ensureNip05Verification(peer, claimedNip05).catch(() => {});
+
+      const item = document.createElement('article');
+      item.className = 'dm-list-member';
+      item.dataset.peer = peer;
+
+      const av = document.createElement('div');
+      av.className = 'dm-av';
+      av.classList.toggle('nip05-square', !!verifiedNip05);
+      setAvatarEl(av, profile.picture || '', pickAvatar(peer));
+      item.appendChild(av);
+
+      const body = document.createElement('div');
+      body.className = 'dm-list-member-main';
+      item.appendChild(body);
+
+      const name = document.createElement('div');
+      name.className = 'dm-list-member-name';
+      name.textContent = dmDisplayNameForPeer(peer);
+      body.appendChild(name);
+
+      const sub = document.createElement('div');
+      sub.className = 'dm-list-member-sub';
+      const npub = formatNpubForDisplay(peer);
+      const shortNpub = npub.startsWith('npub1') && npub.length > 28 ? `${npub.slice(0, 12)}...${npub.slice(-8)}` : (npub || shortHex(peer));
+      if (verifiedNip05) sub.textContent = `${verifiedNip05} - ${shortNpub}`;
+      else if (claimedNip05) sub.textContent = `${claimedNip05} (unverified) - ${shortNpub}`;
+      else sub.textContent = shortNpub;
+      body.appendChild(sub);
+
+      const actions = document.createElement('div');
+      actions.className = 'dm-list-member-actions';
+      item.appendChild(actions);
+
+      const openBtn = document.createElement('button');
+      openBtn.type = 'button';
+      openBtn.className = 'dm-list-member-open';
+      openBtn.dataset.peer = peer;
+      openBtn.textContent = 'Message';
+      actions.appendChild(openBtn);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'dm-list-member-remove';
+      removeBtn.dataset.peer = peer;
+      removeBtn.textContent = 'Remove';
+      removeBtn.disabled = !!state.dmListActionPending;
+      actions.appendChild(removeBtn);
+
+      membersEl.appendChild(item);
+    });
+  }
+
+  function renderDmContactSelect() {
+    renderDmListPanel();
+  }
+
+  async function handleDmAddToSelectedList() {
+    const input = qs('#dmListAddInput');
+    const raw = String(input && input.value || '').trim();
+    if (!raw) {
+      setDmStatus('Enter an npub, NIP-05, nprofile, or hex pubkey first.', 'error');
+      return;
+    }
+    try {
+      const peer = await resolveDmRecipientToken(raw);
+      if (!peer) throw new Error('Could not resolve that account.');
+      fetchProfileIfNeeded(peer);
+      await addPeerToDmSelectedList(peer);
+      if (input) input.value = '';
+      renderDmListPanel();
+    } catch (err) {
+      setDmStatus(err && err.message ? err.message : 'Failed to add account to list.', 'error');
+    }
+  }
+
+  function getDmConversationItems() {
+    const term = String(state.dmSearchTerm || '').trim().toLowerCase();
+    const out = [];
+    const activePeer = normalizePubkeyHex(state.dmActivePeerPubkey);
+    state.dmMessagesByPeer.forEach((messages, peerPubkey) => {
+      const list = Array.isArray(messages) ? messages : [];
+      const peer = normalizePubkeyHex(peerPubkey);
+      if (!peer) return;
+      if (!state.profilesByPubkey.has(peer)) fetchProfileIfNeeded(peer);
+      if (!list.length && peer !== activePeer) return;
+      const latest = list[list.length - 1] || null;
+      const profile = profileFor(peer);
+      const claimedNip05 = normalizeNip05Value(profile.nip05 || '');
+      const verifiedNip05 = getVerifiedNip05ForPubkey(peer, claimedNip05);
+      const name = dmDisplayNameForPeer(peer);
+      const haystack = `${name} ${verifiedNip05 || ''} ${formatNpubForDisplay(peer)} ${dmMessagePreview(latest)}`.toLowerCase();
+      if (term && !haystack.includes(term)) return;
+      out.push({
+        peerPubkey: peer,
+        messages: list,
+        latest,
+        profile,
+        verifiedNip05,
+        unread: getDmUnreadCountForPeer(peer)
+      });
+    });
+    out.sort((a, b) => {
+      const at = Number(a.latest && a.latest.created_at || 0);
+      const bt = Number(b.latest && b.latest.created_at || 0);
+      if (at !== bt) return bt - at;
+      return String(a.peerPubkey || '').localeCompare(String(b.peerPubkey || ''));
+    });
+    return out;
+  }
+
+  function renderDmConversationList() {
+    const listEl = qs('#dmConvoList');
+    const countEl = qs('#dmConvCount');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+
+    const conversations = getDmConversationItems();
+    if (conversations.length && !conversations.some((entry) => entry.peerPubkey === state.dmActivePeerPubkey)) {
+      state.dmActivePeerPubkey = conversations[0].peerPubkey;
+      markDmPeerRead(state.dmActivePeerPubkey);
+    }
+    if (!conversations.length) state.dmActivePeerPubkey = '';
+
+    const totalUnread = conversations.reduce((sum, item) => sum + Number(item.unread || 0), 0);
+    if (countEl) {
+      const convoCountText = `${conversations.length} conversation${conversations.length === 1 ? '' : 's'}`;
+      const unreadText = totalUnread > 0 ? ` - ${totalUnread} unread` : '';
+      countEl.textContent = `${convoCountText}${unreadText}`;
+    }
+
+    if (!conversations.length) {
+      const empty = document.createElement('div');
+      empty.className = 'dm-empty';
+      empty.innerHTML = '<strong>No DMs yet</strong>Use the field above to open a conversation by npub, NIP-05, or hex pubkey.';
+      listEl.appendChild(empty);
+      return;
+    }
+
+    conversations.forEach((item) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'dm-convo';
+      if (item.peerPubkey === state.dmActivePeerPubkey) btn.classList.add('active');
+      btn.dataset.peer = item.peerPubkey;
+
+      const av = document.createElement('div');
+      av.className = 'dm-av';
+      setAvatarEl(av, item.profile.picture || '', pickAvatar(item.peerPubkey));
+      av.classList.toggle('nip05-square', !!item.verifiedNip05);
+      btn.appendChild(av);
+
+      const main = document.createElement('div');
+      main.className = 'dm-convo-main';
+      btn.appendChild(main);
+
+      const top = document.createElement('div');
+      top.className = 'dm-convo-top';
+      main.appendChild(top);
+
+      const name = document.createElement('span');
+      name.className = 'dm-convo-name';
+      name.textContent = dmDisplayNameForPeer(item.peerPubkey);
+      top.appendChild(name);
+
+      const time = document.createElement('span');
+      time.className = 'dm-convo-time';
+      if (item.latest && Number(item.latest.created_at || 0) > 0) {
+        time.textContent = `${formatTimeAgo(item.latest.created_at)} ago`;
+      } else {
+        time.textContent = 'new';
+      }
+      top.appendChild(time);
+
+      if (item.unread > 0) {
+        const unread = document.createElement('span');
+        unread.className = 'dm-unread';
+        unread.textContent = String(item.unread);
+        top.appendChild(unread);
+      }
+
+      const preview = document.createElement('div');
+      preview.className = 'dm-convo-preview';
+      preview.textContent = dmMessagePreview(item.latest);
+      main.appendChild(preview);
+
+      listEl.appendChild(btn);
+    });
+  }
+
+  function renderDmThread(opts = {}) {
+    const titleEl = qs('#dmThreadTitle');
+    const subEl = qs('#dmThreadSub');
+    const threadEl = qs('#dmThread');
+    const composeInput = qs('#dmComposeInput');
+    const sendBtn = qs('#dmSendBtn');
+    const metaEl = qs('#dmComposeMeta');
+    if (!threadEl) return;
+
+    const activePeer = normalizePubkeyHex(state.dmActivePeerPubkey);
+    const hasPeer = !!activePeer;
+    if (titleEl) titleEl.textContent = hasPeer ? dmDisplayNameForPeer(activePeer) : 'Select a conversation';
+    if (subEl) subEl.textContent = hasPeer ? dmDisplaySublineForPeer(activePeer) : 'Only you and the other person can read these DMs.';
+
+    if (composeInput) {
+      composeInput.disabled = !hasPeer || !state.user || state.dmSendPending;
+      composeInput.placeholder = hasPeer
+        ? 'Write an encrypted message'
+        : 'Choose a conversation first';
+      const draft = hasPeer ? String(state.dmDraftByPeer.get(activePeer) || '') : '';
+      if (document.activeElement !== composeInput) composeInput.value = draft;
+    }
+    if (sendBtn) sendBtn.disabled = !hasPeer || !state.user || state.dmSendPending;
+    if (metaEl) {
+      if (!state.user) metaEl.textContent = 'Login required to send encrypted DMs.';
+      else if (!hasPeer) metaEl.textContent = 'Choose a recipient to start chatting.';
+      else if (state.dmSendPending) metaEl.textContent = 'Sending encrypted message...';
+      else metaEl.textContent = 'NIP-04 encrypted DM (kind:4).';
+    }
+
+    threadEl.innerHTML = '';
+    if (!hasPeer) {
+      const empty = document.createElement('div');
+      empty.className = 'dm-empty';
+      empty.innerHTML = '<strong>Select a conversation</strong>Pick someone on the left or start a new DM by entering their npub, NIP-05, or hex pubkey.';
+      threadEl.appendChild(empty);
+      updateDmStatusUi();
+      return;
+    }
+
+    const messages = state.dmMessagesByPeer.get(activePeer) || [];
+    if (!messages.length) {
+      const empty = document.createElement('div');
+      empty.className = 'dm-empty';
+      empty.innerHTML = `<strong>Start chatting with ${dmDisplayNameForPeer(activePeer)}</strong>Messages are encrypted before they are sent to relays.`;
+      threadEl.appendChild(empty);
+      updateDmStatusUi();
+      return;
+    }
+
+    const nearBottom = (threadEl.scrollHeight - threadEl.scrollTop - threadEl.clientHeight) < 36;
+    messages.forEach((message) => {
+      const row = document.createElement('article');
+      row.className = `dm-msg${message.mine ? ' out' : ''}`;
+
+      const top = document.createElement('div');
+      top.className = 'dm-msg-top';
+      const from = document.createElement('span');
+      from.textContent = message.mine ? 'You' : dmDisplayNameForPeer(activePeer);
+      const stamp = document.createElement('span');
+      stamp.textContent = `${formatChatTimestamp(message.created_at)} - ${formatTimeAgo(message.created_at)} ago`;
+      top.appendChild(from);
+      top.appendChild(stamp);
+      row.appendChild(top);
+
+      const body = document.createElement('div');
+      body.className = 'dm-msg-body';
+      if (message.decryptError) {
+        body.textContent = 'Unable to decrypt this DM with the current signer.';
+      } else if (!message.decrypted) {
+        body.textContent = 'Decrypting encrypted message...';
+      } else {
+        const rawText = String(message.content || '');
+        const allUrls = Array.from(new Set(
+          extractHttpUrls(rawText)
+            .map((u) => sanitizeMediaUrl(u))
+            .filter(Boolean)
+        ));
+        const mediaItems = allUrls
+          .map((url) => ({ url, kind: classifyMediaUrl(url) }))
+          .filter((item) => item.kind === 'photo' || item.kind === 'video');
+        const mediaUrls = mediaItems.map((item) => item.url);
+        const spotifyItems = extractSpotifyPreviewItems(allUrls);
+        const spotifyUrls = spotifyItems.map((item) => item.sourceUrl);
+        const urlsToStrip = Array.from(new Set([...mediaUrls, ...spotifyUrls]));
+        const renderText = urlsToStrip.length ? stripMediaUrlsFromText(rawText, urlsToStrip) : rawText;
+        if (String(renderText || '').trim()) body.appendChild(renderNostrContent(renderText));
+        renderChatInlineMedia(body, mediaItems, {
+          allowVideo: true,
+          classPrefix: 'dm',
+          maxItems: 6,
+          videoAutoplay: false,
+          videoMuted: false,
+          videoLoop: false
+        });
+        renderSpotifyLinkPreviews(body, spotifyItems, { classPrefix: 'dm', maxItems: 2 });
+        if (!String(renderText || '').trim() && !mediaItems.length && !spotifyItems.length) {
+          body.textContent = '[empty message]';
+        }
+      }
+      row.appendChild(body);
+
+      const lock = document.createElement('div');
+      lock.className = 'dm-msg-lock';
+      lock.textContent = 'NIP-04 encrypted';
+      row.appendChild(lock);
+
+      threadEl.appendChild(row);
+    });
+
+    if (opts.scrollToBottom || nearBottom) {
+      threadEl.scrollTop = threadEl.scrollHeight;
+    }
+    updateDmStatusUi();
+  }
+
+  function setActiveDmPeer(peerPubkey, opts = {}) {
+    const peer = normalizePubkeyHex(peerPubkey);
+    if (!peer) return;
+    if (!state.dmMessagesByPeer.has(peer)) state.dmMessagesByPeer.set(peer, []);
+    state.dmActivePeerPubkey = peer;
+    if (opts.markRead !== false) markDmPeerRead(peer);
+    renderDmConversationList();
+    renderDmThread({ scrollToBottom: !!opts.scrollToBottom });
+  }
+
+  async function decryptDmContent(peerPubkey, ciphertext) {
+    const peer = normalizePubkeyHex(peerPubkey);
+    if (!peer) throw new Error('Missing DM peer pubkey.');
+    const payload = String(ciphertext || '');
+    if (!payload) return '';
+
+    if (state.authMode === 'nip07') {
+      if (!window.nostr || !window.nostr.nip04 || typeof window.nostr.nip04.decrypt !== 'function') {
+        throw new Error('Signer does not expose NIP-04 decrypt.');
+      }
+      return await window.nostr.nip04.decrypt(peer, payload);
+    }
+
+    if (state.authMode === 'local') {
+      const tools = await ensureNostrTools();
+      if (!tools || !tools.nip04 || typeof tools.nip04.decrypt !== 'function') {
+        throw new Error('NIP-04 decrypt helpers are unavailable.');
+      }
+      const secret = normalizeSecretKey(state.localSecretKey);
+      try {
+        return await tools.nip04.decrypt(secret, peer, payload);
+      } catch (_) {
+        return await tools.nip04.decrypt(bytesToHex(secret), peer, payload);
+      }
+    }
+
+    throw new Error('Login required for DM decryption.');
+  }
+
+  async function encryptDmContent(peerPubkey, plaintext) {
+    const peer = normalizePubkeyHex(peerPubkey);
+    if (!peer) throw new Error('Missing DM recipient pubkey.');
+    const clean = String(plaintext || '');
+
+    if (state.authMode === 'nip07') {
+      if (!window.nostr || !window.nostr.nip04 || typeof window.nostr.nip04.encrypt !== 'function') {
+        throw new Error('Signer does not expose NIP-04 encrypt.');
+      }
+      return await window.nostr.nip04.encrypt(peer, clean);
+    }
+
+    if (state.authMode === 'local') {
+      const tools = await ensureNostrTools();
+      if (!tools || !tools.nip04 || typeof tools.nip04.encrypt !== 'function') {
+        throw new Error('NIP-04 encrypt helpers are unavailable.');
+      }
+      const secret = normalizeSecretKey(state.localSecretKey);
+      try {
+        return await tools.nip04.encrypt(secret, peer, clean);
+      } catch (_) {
+        return await tools.nip04.encrypt(bytesToHex(secret), peer, clean);
+      }
+    }
+
+    throw new Error('Login required for encrypted DM sending.');
+  }
+
+  function queueDmDecrypt(message) {
+    if (!message || !message.id || state.dmDecryptPendingIds.has(message.id)) return;
+    state.dmDecryptPendingIds.add(message.id);
+    decryptDmContent(message.peerPubkey, message.ciphertext)
+      .then((plaintext) => {
+        message.content = String(plaintext || '');
+        message.decrypted = true;
+        message.decryptError = false;
+      })
+      .catch(() => {
+        message.content = '';
+        message.decrypted = false;
+        message.decryptError = true;
+      })
+      .finally(() => {
+        state.dmDecryptPendingIds.delete(message.id);
+        if (isMessagesPageVisible()) {
+          renderDmConversationList();
+          if (state.dmActivePeerPubkey === message.peerPubkey) renderDmThread();
+        }
+      });
+  }
+
+  function subscribeDirectMessages() {
+    const owner = normalizePubkeyHex(state.dmOwnerPubkey || (state.user && state.user.pubkey) || '');
+    if (!owner || !state.pool) return;
+
+    teardownDmSubscription();
+    const since = Math.floor(Date.now() / 1000) - (60 * 60 * 24 * 45);
+    const expectedEose = Math.max(1, Number((state.pool.urls && state.pool.urls.length) || 1));
+    const eoseSeen = new Set();
+    setDmStatus('Syncing encrypted DMs...', 'info');
+
+    state.dmSubId = state.pool.subscribe(
+      [
+        { kinds: [KIND_DIRECT_MESSAGE], authors: [owner], since, limit: 700 },
+        { kinds: [KIND_DIRECT_MESSAGE], '#p': [owner], since, limit: 700 }
+      ],
+      {
+        event: (ev) => {
+          const message = upsertDmMessageFromEvent(ev, owner);
+          if (!message) return;
+
+          if (!state.dmActivePeerPubkey) state.dmActivePeerPubkey = message.peerPubkey;
+          fetchProfileIfNeeded(message.peerPubkey);
+          const peerProfile = profileFor(message.peerPubkey);
+          if (peerProfile && peerProfile.nip05) ensureNip05Verification(message.peerPubkey, peerProfile.nip05).catch(() => {});
+          queueDmDecrypt(message);
+
+          if (isMessagesPageVisible()) {
+            if (!message.mine && state.dmActivePeerPubkey === message.peerPubkey) markDmPeerRead(message.peerPubkey);
+            renderDmConversationList();
+            if (state.dmActivePeerPubkey === message.peerPubkey) {
+              renderDmThread({ scrollToBottom: true });
+            }
+          }
+        },
+        eose: (relayUrl) => {
+          const relayKey = relayUrl || `relay_${eoseSeen.size + 1}`;
+          eoseSeen.add(String(relayKey));
+          if (eoseSeen.size < expectedEose) return;
+          setDmStatus('DM sync complete.', 'success');
+          if (isMessagesPageVisible()) {
+            renderDmConversationList();
+            renderDmThread();
+          }
+        }
+      }
+    );
+  }
+
+  function ensureMessagesSession(opts = {}) {
+    const owner = normalizePubkeyHex(state.user && state.user.pubkey || '');
+    if (!owner) {
+      teardownDmSubscription();
+      return;
+    }
+
+    if (state.dmOwnerPubkey !== owner) {
+      teardownDmSubscription();
+      state.dmOwnerPubkey = owner;
+      state.dmMessagesByPeer = new Map();
+      state.dmEventIds = new Set();
+      state.dmDecryptPendingIds = new Set();
+      state.dmActivePeerPubkey = '';
+      state.dmDraftByPeer = new Map();
+      state.dmSearchTerm = '';
+      state.dmSendPending = false;
+      state.dmListSelection = 'following';
+      state.dmListActionPending = false;
+      state.dmStatus = '';
+      state.dmStatusMode = 'info';
+      loadDmLastReadForOwner(owner);
+    }
+
+    if (opts.subscribe !== false && !state.dmSubId) {
+      subscribeDirectMessages();
+    }
+  }
+
+  async function resolveDmRecipientToken(tokenInput) {
+    let raw = String(tokenInput || '').trim();
+    if (!raw) return '';
+    raw = raw.replace(/^nostr:/i, '');
+    const lower = raw.toLowerCase();
+
+    const asHex = normalizePubkeyHex(raw);
+    if (asHex) return asHex;
+
+    const syncNpub = normalizePubkeyHex(parseNpubMaybe(lower));
+    if (syncNpub) return syncNpub;
+
+    if (/^npub1[023456789acdefghjklmnpqrstuvwxyz]+$/.test(lower)) {
+      return normalizePubkeyHex(await decodeNpubToPubkey(lower));
+    }
+
+    const nip05 = normalizeNip05Value(raw);
+    if (nip05) {
+      return normalizePubkeyHex(await resolveNip05ToPubkey(nip05));
+    }
+
+    if (/^nprofile1[023456789acdefghjklmnpqrstuvwxyz]+$/.test(lower)) {
+      try {
+        const tools = await ensureNostrTools();
+        if (!tools || !tools.nip19 || typeof tools.nip19.decode !== 'function') return '';
+        const decoded = tools.nip19.decode(lower);
+        if (decoded && decoded.type === 'nprofile' && decoded.data && decoded.data.pubkey) {
+          return normalizePubkeyHex(decoded.data.pubkey);
+        }
+      } catch (_) {
+        return '';
+      }
+    }
+
+    return '';
+  }
+
+  async function startDmConversationWithInput(inputValue, opts = {}) {
+    if (!state.user) {
+      window.openLogin();
+      return '';
+    }
+
+    const peer = await resolveDmRecipientToken(inputValue);
+    if (!peer) {
+      setDmStatus('Could not resolve that recipient. Use npub, NIP-05, nprofile, or hex pubkey.', 'error');
+      return '';
+    }
+
+    if (peer === normalizePubkeyHex(state.user.pubkey)) {
+      setDmStatus('You cannot open a DM with your own pubkey.', 'error');
+      return '';
+    }
+
+    state.dmSearchTerm = '';
+    if (!state.dmMessagesByPeer.has(peer)) state.dmMessagesByPeer.set(peer, []);
+    fetchProfileIfNeeded(peer);
+    setActiveDmPeer(peer, { scrollToBottom: true });
+    setDmStatus('DM conversation ready.', 'success');
+
+    const input = qs('#dmNewPeerInput');
+    if (input && opts.clearInput !== false) input.value = '';
+    const compose = qs('#dmComposeInput');
+    if (compose && opts.focusComposer !== false) {
+      try { compose.focus(); } catch (_) {}
+    }
+    return peer;
+  }
+
+  async function sendActiveDirectMessage() {
+    if (state.dmSendPending) return;
+    if (!state.user) {
+      window.openLogin();
+      return;
+    }
+    const peer = normalizePubkeyHex(state.dmActivePeerPubkey);
+    if (!peer) {
+      setDmStatus('Select a conversation first.', 'error');
+      return;
+    }
+
+    const compose = qs('#dmComposeInput');
+    const text = String((compose && compose.value) || '').trim();
+    if (!text) {
+      setDmStatus('Message is empty.', 'error');
+      return;
+    }
+
+    state.dmSendPending = true;
+    renderDmThread();
+    try {
+      const ciphertext = await encryptDmContent(peer, text);
+      const ev = await signAndPublish(KIND_DIRECT_MESSAGE, ciphertext, [['p', peer]]);
+
+      const localMsg = {
+        id: ev.id || `local_dm_${Date.now()}`,
+        peerPubkey: peer,
+        mine: true,
+        pubkey: normalizePubkeyHex(state.user.pubkey) || '',
+        created_at: Number(ev.created_at || Math.floor(Date.now() / 1000)),
+        ciphertext: String(ev.content || ciphertext || ''),
+        content: text,
+        decrypted: true,
+        decryptError: false
+      };
+
+      if (!state.dmEventIds.has(localMsg.id)) {
+        state.dmEventIds.add(localMsg.id);
+        const messages = state.dmMessagesByPeer.get(peer) || [];
+        messages.push(localMsg);
+        messages.sort(dmSortComparator);
+        state.dmMessagesByPeer.set(peer, messages);
+      }
+
+      state.dmDraftByPeer.set(peer, '');
+      if (compose) compose.value = '';
+      setDmStatus('Message sent.', 'success');
+      setActiveDmPeer(peer, { scrollToBottom: true, markRead: true });
+    } catch (err) {
+      setDmStatus(err && err.message ? err.message : 'Failed to send DM.', 'error');
+    } finally {
+      state.dmSendPending = false;
+      renderDmConversationList();
+      renderDmThread();
+    }
+  }
+
+  function bindMessagesDomEvents(rootEl) {
+    if (!rootEl || rootEl.dataset.dmBound === '1') return;
+    rootEl.dataset.dmBound = '1';
+
+    const newInput = qs('#dmNewPeerInput', rootEl);
+    const newBtn = qs('#dmNewPeerBtn', rootEl);
+    const listSelect = qs('#dmListSelect', rootEl);
+    const listMembers = qs('#dmListMembers', rootEl);
+    const listAddInput = qs('#dmListAddInput', rootEl);
+    const listAddBtn = qs('#dmListAddBtn', rootEl);
+    const listCreateBtn = qs('#dmListCreateBtn', rootEl);
+    const listRenameBtn = qs('#dmListRenameBtn', rootEl);
+    const listDeleteBtn = qs('#dmListDeleteBtn', rootEl);
+    const listCreateInput = qs('#dmListCreateInput', rootEl);
+    const listCreateSaveBtn = qs('#dmListCreateSaveBtn', rootEl);
+    const listCreateCancelBtn = qs('#dmListCreateCancelBtn', rootEl);
+    const listRenameInput = qs('#dmListRenameInput', rootEl);
+    const listRenameSaveBtn = qs('#dmListRenameSaveBtn', rootEl);
+    const listRenameCancelBtn = qs('#dmListRenameCancelBtn', rootEl);
+    const searchInput = qs('#dmSearchInput', rootEl);
+    const convoList = qs('#dmConvoList', rootEl);
+    const compose = qs('#dmComposeInput', rootEl);
+    const sendBtn = qs('#dmSendBtn', rootEl);
+    const openProfileBtn = qs('#dmOpenPeerProfileBtn', rootEl);
+
+    if (newBtn) {
+      newBtn.addEventListener('click', () => {
+        startDmConversationWithInput(newInput && newInput.value || '', { clearInput: true, focusComposer: true });
+      });
+    }
+    if (newInput) {
+      newInput.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        startDmConversationWithInput(newInput.value || '', { clearInput: true, focusComposer: true });
+      });
+    }
+
+    if (listSelect) {
+      listSelect.addEventListener('change', () => {
+        state.dmListSelection = String(listSelect.value || '');
+        setDmListEditorMode('');
+        renderDmListPanel();
+      });
+    }
+
+    if (listAddBtn) {
+      listAddBtn.addEventListener('click', () => {
+        handleDmAddToSelectedList();
+      });
+    }
+    if (listAddInput) {
+      listAddInput.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        handleDmAddToSelectedList();
+      });
+    }
+
+    if (listCreateBtn) {
+      listCreateBtn.addEventListener('click', () => {
+        if (state.dmListActionPending) return;
+        setDmListEditorMode('create');
+      });
+    }
+    if (listCreateSaveBtn) {
+      listCreateSaveBtn.addEventListener('click', async () => {
+        if (state.dmListActionPending) return;
+        const nextName = String(listCreateInput && listCreateInput.value || '').trim();
+        if (!nextName) {
+          setDmStatus('List name is required.', 'error');
+          return;
+        }
+        try {
+          await createDmPeopleList(nextName);
+          setDmListEditorMode('');
+          renderDmListPanel();
+        } catch (err) {
+          setDmStatus(err && err.message ? err.message : 'Failed to create list.', 'error');
+        }
+      });
+    }
+    if (listCreateInput) {
+      listCreateInput.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        if (listCreateSaveBtn) listCreateSaveBtn.click();
+      });
+    }
+    if (listCreateCancelBtn) {
+      listCreateCancelBtn.addEventListener('click', () => {
+        setDmListEditorMode('');
+      });
+    }
+
+    if (listRenameBtn) {
+      listRenameBtn.addEventListener('click', () => {
+        if (state.dmListActionPending) return;
+        setDmListEditorMode('rename');
+      });
+    }
+    if (listRenameSaveBtn) {
+      listRenameSaveBtn.addEventListener('click', async () => {
+        if (state.dmListActionPending) return;
+        const nextName = String(listRenameInput && listRenameInput.value || '').trim();
+        if (!nextName) {
+          setDmStatus('List name is required.', 'error');
+          return;
+        }
+        try {
+          await renameDmSelectedPeopleList(nextName);
+          setDmListEditorMode('');
+          renderDmListPanel();
+        } catch (err) {
+          setDmStatus(err && err.message ? err.message : 'Failed to rename list.', 'error');
+        }
+      });
+    }
+    if (listRenameInput) {
+      listRenameInput.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        if (listRenameSaveBtn) listRenameSaveBtn.click();
+      });
+    }
+    if (listRenameCancelBtn) {
+      listRenameCancelBtn.addEventListener('click', () => {
+        setDmListEditorMode('');
+      });
+    }
+
+    if (listDeleteBtn) {
+      listDeleteBtn.addEventListener('click', async () => {
+        if (state.dmListActionPending) return;
+        const context = getDmSelectedListContext();
+        if (!context || context.type !== 'nip51') return;
+        const msg = `Delete "${context.name}"? This removes the list from your NIP-51 lists.`;
+        if (!window.confirm(msg)) return;
+        try {
+          await deleteDmSelectedPeopleList();
+          setDmListEditorMode('');
+          renderDmListPanel();
+        } catch (err) {
+          setDmStatus(err && err.message ? err.message : 'Failed to delete list.', 'error');
+        }
+      });
+    }
+
+    if (listMembers) {
+      listMembers.addEventListener('click', (e) => {
+        const openBtn = e.target.closest('.dm-list-member-open');
+        if (openBtn && openBtn.dataset && openBtn.dataset.peer) {
+          const peer = normalizePubkeyHex(openBtn.dataset.peer);
+          if (!peer) return;
+          if (!state.dmMessagesByPeer.has(peer)) state.dmMessagesByPeer.set(peer, []);
+          fetchProfileIfNeeded(peer);
+          setActiveDmPeer(peer, { scrollToBottom: true, markRead: true });
+          setDmStatus('Opened conversation from list member.', 'success');
+          return;
+        }
+
+        const removeBtn = e.target.closest('.dm-list-member-remove');
+        if (!removeBtn || !removeBtn.dataset || !removeBtn.dataset.peer) return;
+        const peer = normalizePubkeyHex(removeBtn.dataset.peer);
+        if (!peer) return;
+        if (state.dmListActionPending) return;
+        removePeerFromDmSelectedList(peer).catch((err) => {
+          setDmStatus(err && err.message ? err.message : 'Failed to remove account from list.', 'error');
+        });
+      });
+    }
+    if (searchInput) {
+      searchInput.addEventListener('input', (e) => {
+        state.dmSearchTerm = String(e.target && e.target.value || '').trim().toLowerCase();
+        renderDmConversationList();
+      });
+    }
+    if (convoList) {
+      convoList.addEventListener('click', (e) => {
+        const btn = e.target.closest('.dm-convo');
+        if (!btn || !btn.dataset || !btn.dataset.peer) return;
+        setActiveDmPeer(btn.dataset.peer, { scrollToBottom: true, markRead: true });
+      });
+    }
+    if (compose) {
+      compose.addEventListener('input', (e) => {
+        const peer = normalizePubkeyHex(state.dmActivePeerPubkey);
+        if (!peer) return;
+        state.dmDraftByPeer.set(peer, String(e.target && e.target.value || ''));
+      });
+      compose.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' || e.shiftKey) return;
+        e.preventDefault();
+        sendActiveDirectMessage();
+      });
+    }
+    if (sendBtn) {
+      sendBtn.addEventListener('click', () => {
+        sendActiveDirectMessage();
+      });
+    }
+    if (openProfileBtn) {
+      openProfileBtn.addEventListener('click', () => {
+        const peer = normalizePubkeyHex(state.dmActivePeerPubkey);
+        if (!peer) return;
+        showProfileByPubkey(peer);
+      });
+    }
+  }
+
+  function renderMessagesPage(opts = {}) {
+    const root = qs('#messagesRoot');
+    if (!root) return;
+
+    if (!state.user) {
+      teardownDmSubscription();
+      root.dataset.dmBound = '';
+      root.dataset.dmReady = '';
+      root.innerHTML = '<div class="dm-wrap"><div class="dm-panel dm-login-card"><strong>Login Required</strong>Sign in to read and send encrypted DMs.<br><br><button type="button" onclick="openLogin()">Login with Nostr</button></div></div>';
+      return;
+    }
+
+    ensureMessagesSession({ subscribe: opts.subscribe !== false });
+
+    if (!root.dataset.dmReady || opts.forceLayout) {
+      root.innerHTML = `
+        <div class="dm-wrap">
+          <section class="dm-panel dm-lists">
+            <div class="dm-lists-head">
+              <h2>Contacts & Lists</h2>
+              <div class="dm-sub" id="dmListMeta">Create and manage your NIP-51 contact lists.</div>
+              <div class="dm-list-select-row">
+                <select id="dmListSelect" class="dm-contact-select" title="Select list">
+                  <option value="following">Following (0)</option>
+                </select>
+              </div>
+              <div class="dm-list-actions-row">
+                <button id="dmListCreateBtn" type="button">New List</button>
+                <button id="dmListRenameBtn" type="button">Rename</button>
+                <button id="dmListDeleteBtn" type="button">Delete</button>
+              </div>
+              <div class="dm-list-edit-row" id="dmListCreateRow" style="display:none;">
+                <input id="dmListCreateInput" type="text" placeholder="New list name">
+                <button id="dmListCreateSaveBtn" type="button">Save</button>
+                <button id="dmListCreateCancelBtn" type="button">Cancel</button>
+              </div>
+              <div class="dm-list-edit-row" id="dmListRenameRow" style="display:none;">
+                <input id="dmListRenameInput" type="text" placeholder="Rename list">
+                <button id="dmListRenameSaveBtn" type="button">Save</button>
+                <button id="dmListRenameCancelBtn" type="button">Cancel</button>
+              </div>
+              <div class="dm-list-add-row">
+                <input id="dmListAddInput" type="text" placeholder="Add by npub, nip-05, nprofile, or hex pubkey">
+                <button id="dmListAddBtn" type="button">Add</button>
+              </div>
+            </div>
+            <div class="dm-list-members" id="dmListMembers"></div>
+          </section>
+          <section class="dm-panel dm-side">
+            <div class="dm-side-head">
+              <h2>Messages</h2>
+              <div class="dm-sub" id="dmConvCount">0 conversations</div>
+              <div class="dm-new-row">
+                <input id="dmNewPeerInput" type="text" placeholder="npub, nip-05, nprofile, or hex pubkey">
+                <button id="dmNewPeerBtn" type="button">Open</button>
+              </div>
+              <div class="dm-search-row">
+                <input id="dmSearchInput" type="text" placeholder="Search conversations">
+              </div>
+            </div>
+            <div class="dm-convo-list" id="dmConvoList"></div>
+          </section>
+          <section class="dm-panel dm-main">
+            <div class="dm-main-head">
+              <div class="dm-main-title">
+                <h3 id="dmThreadTitle">Select a conversation</h3>
+                <p id="dmThreadSub">Only you and the other person can read these DMs.</p>
+              </div>
+              <div class="dm-main-actions">
+                <button id="dmOpenPeerProfileBtn" type="button">Profile</button>
+                <span class="dm-status" id="dmStatusText"></span>
+              </div>
+            </div>
+            <div class="dm-thread" id="dmThread"></div>
+            <div class="dm-compose">
+              <textarea id="dmComposeInput" placeholder="Write an encrypted message"></textarea>
+              <div class="dm-compose-foot">
+                <small id="dmComposeMeta">NIP-04 encrypted DM (kind:4).</small>
+                <button id="dmSendBtn" type="button">Send DM</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      `;
+      root.dataset.dmReady = '1';
+      bindMessagesDomEvents(root);
+    }
+
+    const searchInput = qs('#dmSearchInput', root);
+    if (searchInput && searchInput.value !== state.dmSearchTerm) searchInput.value = state.dmSearchTerm;
+    renderDmContactSelect();
+    renderDmConversationList();
+    renderDmThread({ scrollToBottom: !!opts.scrollToBottom });
+    updateDmStatusUi();
+  }
+
+  async function openMessagesWithPeer(peerToken, opts = {}) {
+    const routeMode = opts.routeMode || 'push';
+    if (window.showPage) window.showPage('messages', { routeMode });
+    if (!peerToken) return '';
+    return await startDmConversationWithInput(peerToken, { clearInput: true, focusComposer: true });
   }
 
   function parseProfile(ev) {
@@ -2302,18 +3965,33 @@
 
   function parseNip51PeopleList(ev) {
     const tagMap = parseTags(ev.tags || []);
-    const d = firstTag(tagMap, 'd') || '';
+    const dTag = firstTag(tagMap, 'd') || '';
+    const d = dTag || `event-${String(ev.id || '').slice(0, 16) || Number(ev.created_at || 0)}`;
     const name = firstTag(tagMap, 'name') || firstTag(tagMap, 'title') || d || 'Unnamed list';
     const pubkeys = (ev.tags || [])
       .filter((t) => t[0] === 'p' && t[1] && /^[0-9a-f]{64}$/i.test(t[1]))
-      .map((t) => t[1]);
-    return { id: `${ev.kind}:${ev.pubkey}:${d}`, name, pubkeys, kind: ev.kind, d, pubkey: ev.pubkey };
+      .map((t) => normalizePubkeyHex(t[1]))
+      .filter(Boolean);
+    return {
+      id: `${ev.kind}:${ev.pubkey}:${d}`,
+      name,
+      pubkeys: Array.from(new Set(pubkeys)),
+      kind: ev.kind,
+      d,
+      pubkey: ev.pubkey,
+      eventId: ev.id || '',
+      created_at: Number(ev.created_at || 0) || 0
+    };
   }
 
   // Subscribe to user's kind:3 (contacts) and kind:30000 (people lists)
   function subscribeUserLists(pubkey) {
     const normalizedUser = normalizePubkeyHex(pubkey);
     if (!normalizedUser) return;
+    state.nip51Lists = new Map();
+    renderListFilterDD();
+    renderLiveGrid();
+    if (isMessagesPageVisible()) renderDmContactSelect();
 
     // Unsubscribe old
     if (state.nip51SubId) { state.pool.unsubscribe(state.nip51SubId); state.nip51SubId = null; }
@@ -2359,6 +4037,7 @@
           }
 
           renderLiveGrid();
+          if (isMessagesPageVisible()) renderDmContactSelect();
         }
       }
     );
@@ -2370,10 +4049,14 @@
         event: (ev) => {
           if (ev.kind !== KIND_PEOPLE_LIST) return;
           const list = parseNip51PeopleList(ev);
-          if (!list.pubkeys.length) return;
+          const existing = state.nip51Lists.get(list.id);
+          const incomingTs = Number(list.created_at || 0);
+          const existingTs = Number(existing && existing.created_at || 0);
+          if (existing && existingTs > incomingTs) return;
           state.nip51Lists.set(list.id, list);
           renderListFilterDD();
           renderLiveGrid();
+          if (isMessagesPageVisible()) renderDmContactSelect();
         }
       }
     );
@@ -2719,7 +4402,7 @@
           if (sv) return `"${sv.name}"`;
           return 'this filter';
         })();
-      grid.innerHTML = `<div class="following-empty" style="grid-column:1/-1"><div class="following-empty-icon">📡</div><div class="following-empty-title">No live streams in ${filterName}</div><div class="following-empty-sub">Nobody in this list is streaming right now.</div></div>`;
+      grid.innerHTML = `<div class="following-empty" style="grid-column:1/-1"><div class="following-empty-icon">ðŸ“¡</div><div class="following-empty-title">No live streams in ${filterName}</div><div class="following-empty-sub">Nobody in this list is streaming right now.</div></div>`;
       return;
     }
 
@@ -3135,6 +4818,98 @@
     playerBg.appendChild(wrap);
   }
 
+  function isLikelyHlsStreamUrl(url) {
+    const lower = String(url || '').toLowerCase();
+    if (!lower) return false;
+    if (/\.m3u8($|[?#])/.test(lower)) return true;
+    if (/zap\.stream\//.test(lower)) return true;
+    if (/(^|[/?#&])hls([/?#&=]|$)/.test(lower)) return true;
+    if (/[?&](format|type|mime|ext)=([^&]*m3u8|application%2Fvnd\.apple\.mpegurl|application\/vnd\.apple\.mpegurl|application%2Fx-mpegurl|application\/x-mpegurl)/.test(lower)) return true;
+    return false;
+  }
+
+  async function tryPlayVideoWithMutedFallback(video) {
+    if (!video || typeof video.play !== 'function') return false;
+    try {
+      await video.play();
+      return true;
+    } catch (_) {
+      try {
+        video.muted = true;
+        video.defaultMuted = true;
+        await video.play();
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+  }
+
+  async function attachHlsPlaybackWithRecovery(video, url, opts = {}) {
+    const isStale = typeof opts.isStale === 'function' ? opts.isStale : () => false;
+    const onAttach = typeof opts.onAttach === 'function' ? opts.onAttach : () => {};
+    const onFatal = typeof opts.onFatal === 'function' ? opts.onFatal : () => {};
+    const hlsConfig = (opts && opts.hlsConfig && typeof opts.hlsConfig === 'object') ? opts.hlsConfig : {};
+    const maxNetworkRecoveries = Math.max(1, Number(opts.maxNetworkRecoveries || 4));
+    const maxMediaRecoveries = Math.max(1, Number(opts.maxMediaRecoveries || 2));
+
+    const Hls = await ensureHlsJs();
+    if (!Hls || typeof Hls.isSupported !== 'function' || !Hls.isSupported()) return null;
+    if (isStale()) return null;
+
+    const hls = new Hls({
+      enableWorker: true,
+      lowLatencyMode: true,
+      backBufferLength: 12,
+      maxBufferLength: 20,
+      maxMaxBufferLength: 60,
+      manifestLoadingTimeOut: 15000,
+      manifestLoadingMaxRetry: 5,
+      manifestLoadingRetryDelay: 1200,
+      levelLoadingTimeOut: 15000,
+      levelLoadingMaxRetry: 5,
+      fragLoadingTimeOut: 20000,
+      fragLoadingMaxRetry: 5,
+      ...hlsConfig
+    });
+
+    let networkRecoveries = 0;
+    let mediaRecoveries = 0;
+
+    onAttach(hls);
+    hls.loadSource(url);
+    hls.attachMedia(video);
+
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      if (isStale()) return;
+      tryPlayVideoWithMutedFallback(video).catch(() => {});
+    });
+
+    hls.on(Hls.Events.ERROR, (_event, data) => {
+      if (isStale() || !data || !data.fatal) return;
+
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRecoveries < maxNetworkRecoveries) {
+        networkRecoveries += 1;
+        try {
+          hls.startLoad();
+          return;
+        } catch (_) {}
+      }
+
+      if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRecoveries < maxMediaRecoveries) {
+        mediaRecoveries += 1;
+        try {
+          hls.recoverMediaError();
+          return;
+        } catch (_) {}
+      }
+
+      onFatal(data);
+    });
+
+    return hls;
+  }
+
   async function renderVideoPlayback(stream) {
     clearPlayback();
 
@@ -3149,7 +4924,7 @@
       return;
     }
 
-    const url = (stream.streaming || '').trim();
+    const url = sanitizeMediaUrl((stream.streaming || '').trim());
     if (!url) {
       if (playerUi) playerUi.style.display = '';
       playerBg.textContent = 'LIVE';
@@ -3170,83 +4945,76 @@
     video.preload = 'metadata';
     video.style.cssText = 'width:100%;height:100%;object-fit:cover;background:#000;';
 
-    video.addEventListener('error', () => {
-      if (token !== state.playbackToken) return;
-      renderPlaybackFallback('Playback failed. The stream URL may be offline or unsupported.', url);
-    });
-
     playerBg.innerHTML = '';
     playerBg.appendChild(video);
     if (playerUi) playerUi.style.display = 'none';
 
-    const isHlsUrl = /\.m3u8($|\?)/i.test(url) || /zap\.stream\//i.test(url);
+    const isStale = () => token !== state.playbackToken;
+    let hlsAttached = false;
+    let fallbackShown = false;
+    const shouldPreferHls = isLikelyHlsStreamUrl(url);
+    const looksLikeDirectFileVideo = /\.(mp4|webm|mov|m4v|mkv)($|[?#])/i.test(url);
 
-    if (isHlsUrl) {
+    const showFailure = (message) => {
+      if (fallbackShown || isStale()) return;
+      fallbackShown = true;
+      clearPlayback();
+      renderPlaybackFallback(message, url);
+    };
+
+    const attachHls = async () => {
+      if (hlsAttached || isStale()) return false;
+      try {
+        const hls = await attachHlsPlaybackWithRecovery(video, url, {
+          isStale,
+          onAttach: (instance) => { state.hlsInstance = instance; },
+          onFatal: () => {
+            showFailure('Playback failed after multiple retries. The stream may be offline, blocked by CORS, or unsupported.');
+          },
+          hlsConfig: {
+            xhrSetup: (xhr) => { xhr.withCredentials = false; }
+          },
+          maxNetworkRecoveries: 5,
+          maxMediaRecoveries: 2
+        });
+        if (!hls) return false;
+        hlsAttached = true;
+        return true;
+      } catch (_) {
+        return false;
+      }
+    };
+
+    video.addEventListener('error', () => {
+      if (isStale()) return;
+      (async () => {
+        if (!hlsAttached && !video.canPlayType('application/vnd.apple.mpegurl') && (shouldPreferHls || !looksLikeDirectFileVideo)) {
+          const attached = await attachHls();
+          if (attached) return;
+        }
+        showFailure('Playback failed. The stream URL may be offline or unsupported.');
+      })().catch(() => {
+        showFailure('Playback failed. The stream URL may be offline or unsupported.');
+      });
+    });
+
+    let sourceAssigned = false;
+    if (shouldPreferHls) {
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = url;
+        sourceAssigned = true;
       } else {
-        try {
-          const Hls = await ensureHlsJs();
-          if (token !== state.playbackToken) return;
-          if (Hls.isSupported()) {
-            const hls = new Hls({
-              enableWorker: true,
-              lowLatencyMode: true,
-              maxBufferLength: 30,
-              maxMaxBufferLength: 60,
-              manifestLoadingTimeOut: 15000,
-              manifestLoadingMaxRetry: 4,
-              manifestLoadingRetryDelay: 1000,
-              levelLoadingTimeOut: 15000,
-              levelLoadingMaxRetry: 4,
-              fragLoadingTimeOut: 20000,
-              fragLoadingMaxRetry: 4,
-              xhrSetup: (xhr) => { xhr.withCredentials = false; }
-            });
-            state.hlsInstance = hls;
-            hls.loadSource(url);
-            hls.attachMedia(video);
-            hls.on(Hls.Events.MANIFEST_PARSED, () => {
-              if (token !== state.playbackToken) return;
-              video.play().catch(() => { video.muted = true; video.play().catch(() => {}); });
-            });
-            hls.on(Hls.Events.ERROR, (_event, data) => {
-              if (token !== state.playbackToken || !data.fatal) return;
-              if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-                try { hls.startLoad(); } catch (_) {
-                  renderPlaybackFallback('Stream connection lost. The stream may have ended.', url);
-                }
-              } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-                try { hls.recoverMediaError(); } catch (_) {
-                  renderPlaybackFallback('Media decode error. Try opening the stream directly.', url);
-                }
-              } else {
-                renderPlaybackFallback('HLS playback error. Try opening the stream directly.', url);
-              }
-            });
-            return; // play triggered via MANIFEST_PARSED
-          } else {
-            renderPlaybackFallback('HLS is not supported in this browser.', url);
-            return;
-          }
-        } catch (_) {
-          renderPlaybackFallback('Could not load the HLS player library.', url);
-          return;
-        }
+        const attached = await attachHls();
+        if (attached) return;
       }
-    } else {
-      video.src = url;
     }
 
-    try {
-      await video.play();
-    } catch (_) {
-      try {
-        video.muted = true;
-        await video.play();
-      } catch (_) {
-        // user gesture may still be required; controls remain visible
-      }
+    if (!hlsAttached && !sourceAssigned) {
+      video.src = url;
+      sourceAssigned = true;
+    }
+    if (sourceAssigned && !hlsAttached) {
+      await tryPlayVideoWithMutedFallback(video);
     }
   }
 
@@ -3326,7 +5094,10 @@
     // Followers ? fetch from profileStats if already loaded
     const followersEl = qs('#theaterFollowers');
     if (followersEl) {
-      const stats = state.profileStatsByPubkey && state.profileStatsByPubkey.get(stream.pubkey);
+      const statsTargetPubkey = normalizePubkeyHex(stream.hostPubkey || '') || normalizePubkeyHex(stream.pubkey || '');
+      const stats = statsTargetPubkey && state.profileStatsByPubkey
+        ? state.profileStatsByPubkey.get(statsTargetPubkey)
+        : null;
       followersEl.textContent = stats ? formatCount(stats.followers || 0) : '-';
     }
 
@@ -4009,21 +5780,54 @@
     return Math.max(0, Math.floor(raw));
   }
 
+  function satsFromBolt11Tag(bolt11TagValue) {
+    const invoice = String(bolt11TagValue || '').trim().toLowerCase();
+    if (!invoice) return 0;
+    const match = invoice.match(/^ln(?:bc|tb|bcrt|sb|tbs)(\d+)([munp]?)/i);
+    if (!match) return 0;
+
+    const amount = Number(match[1] || 0);
+    if (!Number.isFinite(amount) || amount <= 0) return 0;
+
+    const unit = String(match[2] || '').toLowerCase();
+    let sats = 0;
+    if (unit === 'm') sats = amount * 100000;
+    else if (unit === 'u') sats = amount * 100;
+    else if (unit === 'n') sats = amount / 10;
+    else if (unit === 'p') sats = amount / 10000;
+    else sats = amount * 100000000;
+
+    if (!Number.isFinite(sats) || sats <= 0) return 0;
+    return Math.max(0, Math.floor(sats));
+  }
+
   function parseStreamZapReceipt(ev, stream) {
     if (!ev || ev.kind !== KIND_ZAP_RECEIPT || !stream) return null;
 
     const tags = ev.tags || [];
     const description = parseJsonSafe(firstTagValue(tags, 'description')) || {};
     const descriptionTags = Array.isArray(description.tags) ? description.tags : [];
+    const streamAddress = String(stream.address || '').trim();
+    const streamEventId = String(stream.id || '').trim();
+    const streamPublisherPubkey = normalizePubkeyHex(stream.pubkey || '');
+    const streamHostPubkey = normalizePubkeyHex(stream.hostPubkey || '') || streamPublisherPubkey;
     const targetAList = [...allTagValues(tags, 'a'), ...allTagValues(descriptionTags, 'a')];
     const targetEList = [...allTagValues(tags, 'e'), ...allTagValues(descriptionTags, 'e')];
-    const matchesStream =
-      (stream.address && targetAList.includes(stream.address)) ||
-      (stream.id && targetEList.includes(stream.id));
+    const targetPList = [...allTagValues(tags, 'p'), ...allTagValues(descriptionTags, 'p')]
+      .map((pk) => normalizePubkeyHex(pk))
+      .filter(Boolean);
+    const matchesByAddressOrEvent =
+      (streamAddress && targetAList.includes(streamAddress)) ||
+      (streamEventId && targetEList.includes(streamEventId));
+    const matchesByTargetPubkey = targetPList.some((pk) => pk === streamHostPubkey || pk === streamPublisherPubkey);
+    const hasOtherReference = !matchesByAddressOrEvent && (targetAList.length || targetEList.length);
+    const matchesStream = matchesByAddressOrEvent || (matchesByTargetPubkey && !hasOtherReference);
     if (!matchesStream) return null;
 
     let sats = satsFromAmountTag(firstTagValue(tags, 'amount'));
     if (!sats) sats = satsFromAmountTag(firstTagValue(descriptionTags, 'amount'));
+    if (!sats) sats = satsFromBolt11Tag(firstTagValue(tags, 'bolt11'));
+    if (!sats) sats = satsFromBolt11Tag(firstTagValue(descriptionTags, 'bolt11'));
     if (!sats) return null;
 
     const senderPubkey = normalizePubkeyHex(description.pubkey || ev.pubkey || '');
@@ -4217,7 +6021,7 @@
     const raw = String(content == null ? '' : content).trim();
     if (!raw) return '+';
     const low = raw.toLowerCase();
-    if (low === '+' || low === 'like' || raw === '❤' || raw === '❤️') return '+';
+    if (low === '+' || low === 'like' || raw === 'â¤' || raw === 'â¤ï¸') return '+';
     if (low === '-') return '-';
     return raw;
   }
@@ -4225,7 +6029,7 @@
   function parseReactionMeta(content, tags) {
     const key = normalizeReactionContentKey(content);
     if (!key || key === '-') return null;
-    if (key === '+') return { key: '+', label: '❤', imageUrl: '', shortcode: '' };
+    if (key === '+') return { key: '+', label: 'â¤', imageUrl: '', shortcode: '' };
 
     let imageUrl = '';
     let shortcode = '';
@@ -4656,7 +6460,7 @@
   function defaultReactionPickerOptions() {
     const out = [];
     const seen = new Set();
-    ['❤', '🔥', '👏', '⚡', '😂', '😮', '🚀', '🤙'].forEach((val) => {
+    ['â¤', 'ðŸ”¥', 'ðŸ‘', 'âš¡', 'ðŸ˜‚', 'ðŸ˜®', 'ðŸš€', 'ðŸ¤™'].forEach((val) => {
       const meta = reactionMetaFromPicker(val, '');
       if (!meta || seen.has(meta.key)) return;
       seen.add(meta.key);
@@ -4763,22 +6567,63 @@
     }
   }
 
-  function renderChatInlineMedia(container, mediaUrls) {
+  function renderChatInlineMedia(container, mediaUrls, opts = {}) {
     if (!container || !Array.isArray(mediaUrls) || !mediaUrls.length) return;
+    const allowVideo = !!opts.allowVideo;
+    const classPrefix = String(opts.classPrefix || 'chat').trim() || 'chat';
+    const maxItems = Math.max(1, Number(opts.maxItems || 4));
+    const normalized = mediaUrls
+      .map((entry) => {
+        if (typeof entry === 'string') {
+          const url = sanitizeMediaUrl(entry);
+          return { url, kind: classifyMediaUrl(url) || 'photo' };
+        }
+        const url = sanitizeMediaUrl(entry && entry.url ? entry.url : '');
+        const kind = String((entry && entry.kind) || classifyMediaUrl(url) || '').toLowerCase();
+        return { url, kind };
+      })
+      .filter((item) => item.url && (item.kind === 'photo' || (allowVideo && item.kind === 'video')));
+    if (!normalized.length) return;
+
     const wrap = document.createElement('div');
-    wrap.className = 'chat-media-wrap';
-    if (mediaUrls.length === 1) wrap.classList.add('single');
-    mediaUrls.slice(0, 4).forEach((url) => {
+    wrap.className = `${classPrefix}-media-wrap`;
+    if (normalized.length === 1) wrap.classList.add('single');
+
+    normalized.slice(0, maxItems).forEach((item) => {
+      if (item.kind === 'video') {
+        const box = document.createElement('div');
+        box.className = `${classPrefix}-media-item${normalized.length === 1 ? ' single' : ''} media-video`;
+        const video = document.createElement('video');
+        video.controls = true;
+        video.autoplay = !!opts.videoAutoplay;
+        video.loop = !!opts.videoLoop;
+        video.muted = !!opts.videoMuted;
+        video.defaultMuted = !!opts.videoMuted;
+        video.playsInline = true;
+        video.preload = 'metadata';
+        video.src = item.url;
+        video.addEventListener('error', () => {
+          box.remove();
+          if (!wrap.children.length) wrap.remove();
+        });
+        box.appendChild(video);
+        wrap.appendChild(box);
+        return;
+      }
+
       const a = document.createElement('a');
-      a.className = 'chat-media-item' + (mediaUrls.length === 1 ? ' single' : '');
-      a.href = url;
+      a.className = `${classPrefix}-media-item${normalized.length === 1 ? ' single' : ''}`;
+      a.href = item.url;
       a.target = '_blank';
       a.rel = 'noopener noreferrer';
       const img = document.createElement('img');
-      img.src = url;
-      img.alt = 'Chat image';
+      img.src = item.url;
+      img.alt = `${classPrefix === 'dm' ? 'DM' : 'Chat'} image`;
       img.loading = 'lazy';
-      img.addEventListener('error', () => { a.remove(); });
+      img.addEventListener('error', () => {
+        a.remove();
+        if (!wrap.children.length) wrap.remove();
+      });
       a.appendChild(img);
       wrap.appendChild(a);
     });
@@ -4792,22 +6637,25 @@
 
     const wasNearBottom = (sc.scrollHeight - sc.scrollTop - sc.clientHeight) <= 28;
     state.chatMessageEventsById.set(ev.id, ev);
-    const p = profileFor(ev.pubkey);
+    const messagePubkey = normalizePubkeyHex(ev.pubkey || '') || String(ev.pubkey || '').trim();
+    const p = profileFor(messagePubkey);
     const row = document.createElement('div');
     row.className = 'cmsg';
-    row.dataset.pubkey = ev.pubkey;
+    row.dataset.pubkey = messagePubkey;
     row.dataset.msgId = ev.id;
     row.dataset.createdAt = String(Number(ev.created_at || 0) || 0);
     row.innerHTML = `<div class="c-av"></div><div class="c-body"><div class="c-name-row"><span class="c-name"></span><span class="c-time"></span></div><div class="c-text"></div></div><div class="chat-msg-actions"><button class="cma-btn like-cma chat-like-btn" title="Like">&#10084; <span class="chat-like-count">0</span></button></div>`;
     const avEl = qs('.c-av', row);
-    setAvatarEl(avEl, p.picture || '', pickAvatar(ev.pubkey));
-    const chatNip05 = getVerifiedNip05ForPubkey(ev.pubkey, p.nip05 || '');
+    setAvatarEl(avEl, p.picture || '', pickAvatar(messagePubkey));
+    const chatNip05 = getVerifiedNip05ForPubkey(messagePubkey, p.nip05 || '');
     if (chatNip05) avEl.classList.add('nip05-square');
-    else if (normalizeNip05Value(p.nip05 || '')) ensureNip05Verification(ev.pubkey, p.nip05 || '').catch(() => {});
-    avEl.onclick = () => showProfileByPubkey(ev.pubkey);
+    else if (normalizeNip05Value(p.nip05 || '')) ensureNip05Verification(messagePubkey, p.nip05 || '').catch(() => {});
+    avEl.onclick = () => showProfileByPubkey(messagePubkey);
     const nameEl = qs('.c-name', row);
-    nameEl.textContent = state.profilesByPubkey.has(ev.pubkey) ? p.name : shortHex(ev.pubkey);
-    nameEl.onclick = () => showProfileByPubkey(ev.pubkey);
+    nameEl.textContent = state.profilesByPubkey.has(messagePubkey)
+      ? (p.display_name || p.name || shortHex(messagePubkey))
+      : shortHex(messagePubkey);
+    nameEl.onclick = () => showProfileByPubkey(messagePubkey);
     const timeEl = qs('.c-time', row);
     if (timeEl) {
       timeEl.textContent = formatChatTimestamp(ev.created_at);
@@ -4815,14 +6663,29 @@
     }
     const ctext = qs('.c-text', row);
     const rawText = String(ev.content || '');
-    const mediaUrls = Array.from(new Set(
+    const allUrls = Array.from(new Set(
       extractHttpUrls(rawText)
         .map((u) => sanitizeMediaUrl(u))
-        .filter((u) => classifyMediaUrl(u) === 'photo')
+        .filter(Boolean)
     ));
-    const renderText = mediaUrls.length ? stripMediaUrlsFromText(rawText, mediaUrls) : rawText;
+    const mediaItems = allUrls
+      .map((url) => ({ url, kind: classifyMediaUrl(url) }))
+      .filter((item) => item.kind === 'photo' || item.kind === 'video');
+    const mediaUrls = mediaItems.map((item) => item.url);
+    const spotifyItems = extractSpotifyPreviewItems(allUrls);
+    const spotifyUrls = spotifyItems.map((item) => item.sourceUrl);
+    const urlsToStrip = Array.from(new Set([...mediaUrls, ...spotifyUrls]));
+    const renderText = urlsToStrip.length ? stripMediaUrlsFromText(rawText, urlsToStrip) : rawText;
     if (renderText) ctext.appendChild(renderNostrContent(renderText));
-    renderChatInlineMedia(ctext, mediaUrls);
+    renderChatInlineMedia(ctext, mediaItems, {
+      allowVideo: true,
+      classPrefix: 'chat',
+      maxItems: 4,
+      videoAutoplay: false,
+      videoMuted: false,
+      videoLoop: false
+    });
+    renderSpotifyLinkPreviews(ctext, spotifyItems, { classPrefix: 'chat', maxItems: 2 });
     const likeBtn = qs('.chat-like-btn', row);
     if (likeBtn) likeBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -4865,6 +6728,7 @@
       if (window.SifakaCommunities && typeof window.SifakaCommunities.refreshContext === 'function') {
         window.SifakaCommunities.refreshContext();
       }
+      if (isMessagesPageVisible()) renderMessagesPage({ subscribe: false, forceLayout: true });
       return;
     }
     setLoggedInUi(true);
@@ -4904,6 +6768,7 @@
     if (window.SifakaCommunities && typeof window.SifakaCommunities.refreshContext === 'function') {
       window.SifakaCommunities.refreshContext();
     }
+    if (isMessagesPageVisible()) renderMessagesPage({ subscribe: true });
   }
 
   function subscribeProfiles(pubkeys) {
@@ -4934,6 +6799,13 @@
             renderProfilePage(ev.pubkey);
             syncProfileRoute(ev.pubkey, 'replace');
           }
+          if (isMessagesPageVisible()) {
+            renderDmContactSelect();
+            renderDmConversationList();
+            if (normalizePubkeyHex(state.dmActivePeerPubkey) === normalizePubkeyHex(ev.pubkey)) {
+              renderDmThread();
+            }
+          }
         }
       }
     );
@@ -4960,6 +6832,11 @@
       const parsed = parseProfile(latest);
       state.profilesByPubkey.set(pubkey, parsed);
       ensureNip05Verification(pubkey, parsed.nip05 || '').catch(() => {});
+      if (isMessagesPageVisible()) {
+        renderDmContactSelect();
+        renderDmConversationList();
+        if (normalizePubkeyHex(state.dmActivePeerPubkey) === normalizePubkeyHex(pubkey)) renderDmThread();
+      }
     }).catch(() => {});
   }
 
@@ -5003,6 +6880,8 @@
     if (!stream) return;
     if (state.chatSubId) state.pool.unsubscribe(state.chatSubId);
     if (state.chatReactionSubId) { try { state.pool.unsubscribe(state.chatReactionSubId); } catch (_) {} state.chatReactionSubId = null; }
+    if (state._chatProfileFetchTimer) { clearTimeout(state._chatProfileFetchTimer); state._chatProfileFetchTimer = null; }
+    if (state._chatProfileEoseTimer) { clearTimeout(state._chatProfileEoseTimer); state._chatProfileEoseTimer = null; }
     if (state._chatProfileSubId) { try { state.pool.unsubscribe(state._chatProfileSubId); } catch (_) {} state._chatProfileSubId = null; }
     const sc = qs('#chatScroll');
     if (sc) sc.innerHTML = '';
@@ -5028,37 +6907,61 @@
     const seenIds = new Set();
     const unknownPubkeys = new Set(); // pubkeys seen in chat but not yet in profile cache
 
+    function scheduleMissingChatProfiles(delayMs = 220) {
+      if (state._chatProfileFetchTimer) clearTimeout(state._chatProfileFetchTimer);
+      state._chatProfileFetchTimer = setTimeout(() => {
+        state._chatProfileFetchTimer = null;
+        fetchMissingChatProfiles();
+      }, Math.max(0, Number(delayMs || 0)));
+    }
+
     // Called after EOSE and also for each new real-time message
     function fetchMissingChatProfiles() {
       if (!unknownPubkeys.size) return;
-      const toFetch = Array.from(unknownPubkeys).filter((pk) => !state.profilesByPubkey.has(pk));
+      const toFetch = Array.from(new Set(
+        Array.from(unknownPubkeys)
+          .map((pk) => normalizePubkeyHex(pk))
+          .filter((pk) => pk && !state.profilesByPubkey.has(pk))
+      ));
       unknownPubkeys.clear();
       if (!toFetch.length) return;
 
+      if (state._chatProfileEoseTimer) { clearTimeout(state._chatProfileEoseTimer); state._chatProfileEoseTimer = null; }
       if (state._chatProfileSubId) { try { state.pool.unsubscribe(state._chatProfileSubId); } catch (_) {} }
       state._chatProfileSubId = state.pool.subscribe(
         [{ kinds: [KIND_PROFILE], authors: toFetch, limit: toFetch.length * 2 }],
         {
           event: (profileEv) => {
             if (profileEv.kind !== KIND_PROFILE) return;
+            const normalizedProfilePubkey = normalizePubkeyHex(profileEv.pubkey || '');
+            if (!normalizedProfilePubkey) return;
             const p = parseProfile(profileEv);
-            state.profilesByPubkey.set(profileEv.pubkey, p);
-            ensureNip05Verification(profileEv.pubkey, p.nip05 || '').catch(() => {});
+            state.profilesByPubkey.set(normalizedProfilePubkey, { ...p, pubkey: normalizedProfilePubkey });
+            ensureNip05Verification(normalizedProfilePubkey, p.nip05 || '').catch(() => {});
             // Update all chat rows for this pubkey
             const chatEl = qs('#chatScroll');
             if (!chatEl) return;
-            chatEl.querySelectorAll(`.cmsg[data-pubkey="${CSS.escape(profileEv.pubkey)}"]`).forEach((row) => {
+            chatEl.querySelectorAll(`.cmsg[data-pubkey="${CSS.escape(normalizedProfilePubkey)}"]`).forEach((row) => {
               const avEl = row.querySelector('.c-av');
               const nameEl = row.querySelector('.c-name');
               if (avEl) {
-                setAvatarEl(avEl, p.picture || '', pickAvatar(profileEv.pubkey));
-                const verified = !!getVerifiedNip05ForPubkey(profileEv.pubkey, p.nip05 || '');
+                setAvatarEl(avEl, p.picture || '', pickAvatar(normalizedProfilePubkey));
+                const verified = !!getVerifiedNip05ForPubkey(normalizedProfilePubkey, p.nip05 || '');
                 avEl.classList.toggle('nip05-square', verified);
               }
-              if (nameEl) nameEl.textContent = p.name || shortHex(profileEv.pubkey);
+              if (nameEl) nameEl.textContent = p.display_name || p.name || shortHex(normalizedProfilePubkey);
             });
           },
-          eose: () => { try { state.pool.unsubscribe(state._chatProfileSubId); } catch (_) {} state._chatProfileSubId = null; }
+          eose: () => {
+            if (state._chatProfileEoseTimer) clearTimeout(state._chatProfileEoseTimer);
+            // Some relays send EOSE before others; wait briefly to gather all profile events.
+            state._chatProfileEoseTimer = setTimeout(() => {
+              state._chatProfileEoseTimer = null;
+              if (!state._chatProfileSubId) return;
+              try { state.pool.unsubscribe(state._chatProfileSubId); } catch (_) {}
+              state._chatProfileSubId = null;
+            }, 1100);
+          }
         }
       );
     }
@@ -5092,24 +6995,31 @@
         seenIds.add(ev.id);
         renderChatMessage(ev);
         // Queue profile fetch for unknown sender
-        if (!state.profilesByPubkey.has(ev.pubkey)) unknownPubkeys.add(ev.pubkey);
+        const senderPubkey = normalizePubkeyHex(ev.pubkey || '');
+        if (senderPubkey && !state.profilesByPubkey.has(senderPubkey)) {
+          unknownPubkeys.add(senderPubkey);
+          scheduleMissingChatProfiles();
+        }
       },
       eose: () => {
         // Batch-fetch all profiles we saw during history replay
-        fetchMissingChatProfiles();
+        scheduleMissingChatProfiles(0);
       }
     });
 
+    const reactionSince = streamStart
+      ? Math.max(0, streamStart - 60 * 60 * 12)
+      : (nowSec - 60 * 60 * 24 * 7);
     const reactionFilters = [
-      { kinds: [KIND_REACTION, KIND_DELETION], '#a': [stream.address], limit: 1200, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 },
-      { kinds: [KIND_ZAP_RECEIPT], '#a': [stream.address], limit: 600, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 }
+      { kinds: [KIND_REACTION, KIND_DELETION], '#a': [stream.address], limit: 1200, since: reactionSince },
+      { kinds: [KIND_ZAP_RECEIPT], '#a': [stream.address], limit: 1200, since: reactionSince }
     ];
     if (stream.id) {
-      reactionFilters.push({ kinds: [KIND_ZAP_RECEIPT], '#e': [stream.id], limit: 600, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 });
+      reactionFilters.push({ kinds: [KIND_ZAP_RECEIPT], '#e': [stream.id], limit: 1200, since: reactionSince });
     }
-    const pTargets = [...new Set([stream.pubkey, stream.hostPubkey].filter((pk) => /^[0-9a-f]{64}$/i.test(pk || '')) )];
+    const pTargets = [...new Set([stream.pubkey, stream.hostPubkey].map((pk) => normalizePubkeyHex(pk)).filter(Boolean))];
     if (pTargets.length) {
-      reactionFilters.push({ kinds: [KIND_ZAP_RECEIPT], '#p': pTargets, limit: 600, since: Math.floor(Date.now() / 1000) - 60 * 60 * 24 });
+      reactionFilters.push({ kinds: [KIND_ZAP_RECEIPT], '#p': pTargets, limit: 1200, since: reactionSince });
     }
 
     state.chatReactionSubId = state.pool.subscribe(
@@ -5167,6 +7077,8 @@
     state.pendingRouteAddress = '';
     state.pendingRouteNaddr = '';
     state.selectedStreamAddress = address;
+    const statsTargetPubkey = normalizePubkeyHex(stream.hostPubkey || '') || normalizePubkeyHex(stream.pubkey || '');
+    if (statsTargetPubkey) subscribeProfileStats(statsTargetPubkey);
     if (routeMode !== 'skip') syncTheaterRoute(stream, routeMode);
     renderVideo(stream);
     subscribeChat(stream);
@@ -5253,60 +7165,74 @@
     video.style.cssText = 'width:100%;height:100%;object-fit:cover;background:#000;';
     host.appendChild(video);
 
-    video.addEventListener('error', () => {
-      if (token !== state.profilePlaybackToken) return;
+    const isStale = () => token !== state.profilePlaybackToken;
+    let hlsAttached = false;
+    let fallbackShown = false;
+    const shouldPreferHls = isLikelyHlsStreamUrl(url);
+    const looksLikeDirectFileVideo = /\.(mp4|webm|mov|m4v|mkv)($|[?#])/i.test(url);
+
+    const showFailure = (message) => {
+      if (fallbackShown || isStale()) return;
+      fallbackShown = true;
       clearProfilePlayback();
-      renderProfilePlaybackFallback('Profile live playback failed in this browser.', url);
+      renderProfilePlaybackFallback(message, url);
+    };
+
+    const attachHls = async () => {
+      if (hlsAttached || isStale()) return false;
+      try {
+        const hls = await attachHlsPlaybackWithRecovery(video, url, {
+          isStale,
+          onAttach: (instance) => { state.profileHlsInstance = instance; },
+          onFatal: () => {
+            showFailure('Live playback failed after retries. The stream may be offline or blocked by CORS.');
+          },
+          hlsConfig: {
+            backBufferLength: 8,
+            maxBufferLength: 14,
+            xhrSetup: (xhr) => { xhr.withCredentials = false; }
+          },
+          maxNetworkRecoveries: 5,
+          maxMediaRecoveries: 2
+        });
+        if (!hls) return false;
+        hlsAttached = true;
+        return true;
+      } catch (_) {
+        return false;
+      }
+    };
+
+    video.addEventListener('error', () => {
+      if (isStale()) return;
+      (async () => {
+        if (!hlsAttached && !video.canPlayType('application/vnd.apple.mpegurl') && (shouldPreferHls || !looksLikeDirectFileVideo)) {
+          const attached = await attachHls();
+          if (attached) return;
+        }
+        showFailure('Profile live playback failed in this browser.');
+      })().catch(() => {
+        showFailure('Profile live playback failed in this browser.');
+      });
     });
 
-    const isHlsUrl = /\.m3u8($|\?)/i.test(url);
-    if (isHlsUrl) {
+    let sourceAssigned = false;
+    if (shouldPreferHls) {
       if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = url;
+        sourceAssigned = true;
       } else {
-        try {
-          const Hls = await ensureHlsJs();
-          if (token !== state.profilePlaybackToken) return;
-          if (!Hls.isSupported()) {
-            clearProfilePlayback();
-            renderProfilePlaybackFallback('HLS is not supported in this browser.', url);
-            return;
-          }
-
-          const hls = new Hls({
-            enableWorker: true,
-            lowLatencyMode: true,
-            backBufferLength: 8,
-            maxBufferLength: 14
-          });
-          state.profileHlsInstance = hls;
-          hls.loadSource(url);
-          hls.attachMedia(video);
-          hls.on(Hls.Events.ERROR, (_event, data) => {
-            if (data && data.fatal && token === state.profilePlaybackToken) {
-              clearProfilePlayback();
-              renderProfilePlaybackFallback('HLS playback failed. Open stream directly instead.', url);
-            }
-          });
-        } catch (_) {
-          clearProfilePlayback();
-          renderProfilePlaybackFallback('Could not load HLS playback library.', url);
-          return;
-        }
+        const attached = await attachHls();
+        if (attached) return;
       }
-    } else {
-      video.src = url;
     }
 
-    try {
-      await video.play();
-    } catch (_) {
-      try {
-        video.muted = true;
-        await video.play();
-      } catch (_) {
-        // user gesture may still be required
-      }
+    if (!hlsAttached && !sourceAssigned) {
+      video.src = url;
+      sourceAssigned = true;
+    }
+    if (sourceAssigned && !hlsAttached) {
+      await tryPlayVideoWithMutedFallback(video);
     }
   }
 
@@ -5553,7 +7479,7 @@
                     const a = document.createElement('a');
                     a.href = m.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
                     a.style.cssText = 'display:flex;align-items:center;justify-content:center;width:100%;min-height:80px;color:var(--zap);font-size:.74rem;font-weight:600;text-decoration:none;padding:.75rem;';
-                    a.textContent = '▶ Open HLS stream';
+                    a.textContent = 'â–¶ Open HLS stream';
                     if (v.parentNode) v.parentNode.replaceChild(a, v);
                   }
                 });
@@ -5570,7 +7496,7 @@
           const fallback = document.createElement('a');
           fallback.href = m.url; fallback.target = '_blank'; fallback.rel = 'noopener noreferrer';
           fallback.style.cssText = 'display:flex;align-items:center;justify-content:center;width:100%;min-height:80px;color:var(--zap);font-size:.74rem;font-weight:600;text-decoration:none;padding:.75rem;';
-          fallback.textContent = '▶ Open Video';
+          fallback.textContent = 'â–¶ Open Video';
           if (v.parentNode) v.parentNode.replaceChild(fallback, v);
         });
         frame.appendChild(v);
@@ -5613,7 +7539,7 @@
 
       const originalProfile = (isRepost && originalPubkey) ? profileFor(originalPubkey) : null;
       const boostBanner = isRepost
-        ? `<div class="pf-boost-banner"><span class="pf-boost-icon">🔁</span><span class="pf-boost-label">${profile.display_name || profile.name || 'User'} boosted</span></div>`
+        ? `<div class="pf-boost-banner"><span class="pf-boost-icon">ðŸ”</span><span class="pf-boost-label">${profile.display_name || profile.name || 'User'} boosted</span></div>`
         : '';
 
       item.innerHTML = `${boostBanner}
@@ -5958,6 +7884,116 @@
     return '';
   }
 
+  function parseSpotifyPreviewUrl(rawUrl) {
+    const clean = sanitizeMediaUrl(rawUrl);
+    if (!clean || !/^https?:\/\//i.test(clean)) return null;
+    let parsed;
+    try {
+      parsed = new URL(clean);
+    } catch (_) {
+      return null;
+    }
+
+    const host = String(parsed.hostname || '').toLowerCase();
+    if (!(host === 'open.spotify.com' || host === 'play.spotify.com')) return null;
+
+    const segments = String(parsed.pathname || '')
+      .split('/')
+      .filter(Boolean);
+    if (!segments.length) return null;
+
+    let idx = 0;
+    if (segments[0] === 'intl' && segments.length >= 3) idx = 2;
+    else if (segments[0].startsWith('intl-') && segments.length >= 3) idx = 1;
+    if (segments[idx] === 'embed') idx += 1;
+
+    const type = String(segments[idx] || '').toLowerCase();
+    const id = String(segments[idx + 1] || '').split('?')[0].trim();
+    if (!type || !id) return null;
+    if (!['track', 'album', 'playlist', 'artist', 'episode', 'show'].includes(type)) return null;
+    if (!/^[a-z0-9]{8,64}$/i.test(id)) return null;
+
+    const canonicalUrl = `https://open.spotify.com/${type}/${id}`;
+    const embedUrl = `https://open.spotify.com/embed/${type}/${id}?utm_source=sifaka_live`;
+    const compact = type === 'track' || type === 'episode';
+    const labelMap = {
+      track: 'Spotify Track',
+      album: 'Spotify Album',
+      playlist: 'Spotify Playlist',
+      artist: 'Spotify Artist',
+      episode: 'Spotify Episode',
+      show: 'Spotify Show'
+    };
+
+    return {
+      sourceUrl: clean,
+      canonicalUrl,
+      embedUrl,
+      type,
+      id,
+      compact,
+      label: labelMap[type] || 'Spotify'
+    };
+  }
+
+  function extractSpotifyPreviewItems(urls) {
+    const list = Array.isArray(urls) ? urls : [];
+    const out = [];
+    const seen = new Set();
+    list.forEach((url) => {
+      const parsed = parseSpotifyPreviewUrl(url);
+      if (!parsed) return;
+      const key = `${parsed.type}:${parsed.id}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(parsed);
+    });
+    return out;
+  }
+
+  function renderSpotifyLinkPreviews(container, items, opts = {}) {
+    if (!container || !Array.isArray(items) || !items.length) return;
+    const classPrefix = String(opts.classPrefix || 'chat').trim() || 'chat';
+    const maxItems = Math.max(1, Number(opts.maxItems || 2));
+    const wrap = document.createElement('div');
+    wrap.className = `${classPrefix}-spotify-wrap spotify-preview-wrap`;
+
+    items.slice(0, maxItems).forEach((item) => {
+      if (!item || !item.embedUrl) return;
+      const card = document.createElement('article');
+      card.className = `spotify-preview-card${item.compact ? ' compact' : ' expanded'}`;
+
+      const head = document.createElement('div');
+      head.className = 'spotify-preview-head';
+      const label = document.createElement('span');
+      label.className = 'spotify-preview-label';
+      label.textContent = item.label || 'Spotify';
+      const open = document.createElement('a');
+      open.className = 'spotify-preview-open';
+      open.href = item.canonicalUrl || item.sourceUrl || item.embedUrl;
+      open.target = '_blank';
+      open.rel = 'noopener noreferrer';
+      open.textContent = 'Open';
+      head.appendChild(label);
+      head.appendChild(open);
+      card.appendChild(head);
+
+      const frame = document.createElement('iframe');
+      frame.className = 'spotify-preview-frame';
+      frame.src = item.embedUrl;
+      frame.loading = 'lazy';
+      frame.allow = 'autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture';
+      frame.referrerPolicy = 'strict-origin-when-cross-origin';
+      frame.title = `${item.label || 'Spotify'} preview`;
+      frame.height = item.compact ? '152' : '352';
+      frame.setAttribute('allowfullscreen', '');
+      card.appendChild(frame);
+      wrap.appendChild(card);
+    });
+
+    if (wrap.children.length) container.appendChild(wrap);
+  }
+
   function extractMediaUrlsFromEvent(ev) {
     const urls = extractHttpUrls(ev && ev.content ? ev.content : '').map((u) => sanitizeMediaUrl(u)).filter(Boolean);
     const tags = (ev && Array.isArray(ev.tags)) ? ev.tags : [];
@@ -6096,7 +8132,7 @@
         video.addEventListener('error', () => {
           const fb = document.createElement('div');
           fb.className = 'profile-video-fallback';
-      fb.innerHTML = `<a href="${item.url}" target="_blank" rel="noopener noreferrer" style="color:var(--zap)">▶ Open Video</a>`;
+      fb.innerHTML = `<a href="${item.url}" target="_blank" rel="noopener noreferrer" style="color:var(--zap)">â–¶ Open Video</a>`;
           frame.replaceChild(fb, video);
         });
         frame.appendChild(video);
@@ -6381,62 +8417,89 @@
     if (followingEl) followingEl.textContent = formatCount(stats.following || 0);
   }
 
+  function refreshTheaterFollowerStat(pubkey, followersCount) {
+    const target = normalizePubkeyHex(pubkey);
+    if (!target) return;
+    const openStream = state.selectedStreamAddress && state.streamsByAddress.get(state.selectedStreamAddress);
+    if (!openStream) return;
+    const openTarget = normalizePubkeyHex(openStream.hostPubkey || '') || normalizePubkeyHex(openStream.pubkey || '');
+    if (openTarget !== target) return;
+    const el = qs('#theaterFollowers');
+    if (el) el.textContent = formatCount(Math.max(0, Number(followersCount || 0)));
+  }
+
   function subscribeProfileStats(pubkey) {
-    if (!pubkey) return;
-    if (state.profileStatsSubId) state.pool.unsubscribe(state.profileStatsSubId);
+    const target = normalizePubkeyHex(pubkey);
+    if (!target) {
+      if (state.profileStatsSubId) {
+        try { state.pool.unsubscribe(state.profileStatsSubId); } catch (_) {}
+      }
+      state.profileStatsSubId = null;
+      state.profileStatsTargetPubkey = '';
+      return;
+    }
+
+    if (state.profileStatsSubId && state.profileStatsTargetPubkey === target) {
+      const existing = state.profileStatsByPubkey.get(target) || { followers: 0, following: 0 };
+      refreshProfileHeaderStats(target);
+      refreshTheaterFollowerStat(target, existing.followers || 0);
+      return;
+    }
+
+    if (state.profileStatsSubId) {
+      try { state.pool.unsubscribe(state.profileStatsSubId); } catch (_) {}
+      state.profileStatsSubId = null;
+    }
+    state.profileStatsTargetPubkey = target;
 
     let followerSet = new Set();
     let followingSet = new Set();
     let latestFollowingCreated = 0;
 
-    state.profileStatsByPubkey.set(pubkey, { followers: 0, following: 0 });
+    state.profileStatsByPubkey.set(target, { followers: 0, following: 0 });
 
     state.profileStatsSubId = state.pool.subscribe(
       [
-        { kinds: [3], authors: [pubkey], limit: 10 },
-        { kinds: [3], '#p': [pubkey], limit: 400 }
+        { kinds: [3], authors: [target], limit: 10 },
+        { kinds: [3], '#p': [target], limit: 400 }
       ],
       {
         event: (ev) => {
           if (ev.kind !== 3) return;
+          const eventPubkey = normalizePubkeyHex(ev.pubkey || '');
+          if (!eventPubkey) return;
 
-          if (ev.pubkey === pubkey) {
+          if (eventPubkey === target) {
             const created = Number(ev.created_at || 0);
             if (created >= latestFollowingCreated) {
               latestFollowingCreated = created;
               followingSet = new Set();
               (ev.tags || []).forEach((tag) => {
-                if (Array.isArray(tag) && tag[0] === 'p' && tag[1]) followingSet.add(tag[1]);
+                if (Array.isArray(tag) && tag[0] === 'p' && tag[1]) {
+                  const normalized = normalizePubkeyHex(tag[1]);
+                  if (normalized) followingSet.add(normalized);
+                }
               });
             }
           } else {
-            followerSet.add(ev.pubkey);
+            followerSet.add(eventPubkey);
           }
 
-          state.profileStatsByPubkey.set(pubkey, {
+          state.profileStatsByPubkey.set(target, {
             followers: followerSet.size,
             following: followingSet.size
           });
 
-          refreshProfileHeaderStats(pubkey);
-          // Refresh theater stat if this is the open stream's host
-          const openStream = state.selectedStreamAddress && state.streamsByAddress.get(state.selectedStreamAddress);
-          if (openStream && openStream.pubkey === pubkey) {
-            const el = qs('#theaterFollowers');
-            if (el) el.textContent = formatCount(followerSet.size);
-          }
+          refreshProfileHeaderStats(target);
+          refreshTheaterFollowerStat(target, followerSet.size);
         },
         eose: () => {
-          state.profileStatsByPubkey.set(pubkey, {
+          state.profileStatsByPubkey.set(target, {
             followers: followerSet.size,
             following: followingSet.size
           });
-          refreshProfileHeaderStats(pubkey);
-          const openStream = state.selectedStreamAddress && state.streamsByAddress.get(state.selectedStreamAddress);
-          if (openStream && openStream.pubkey === pubkey) {
-            const el = qs('#theaterFollowers');
-            if (el) el.textContent = formatCount(followerSet.size);
-          }
+          refreshProfileHeaderStats(target);
+          refreshTheaterFollowerStat(target, followerSet.size);
         }
       }
     );
@@ -6805,6 +8868,8 @@
   }
 
   function setAuthenticatedUser(pubkey, authMode) {
+    const previousUser = normalizePubkeyHex(state.user && state.user.pubkey || '');
+    const nextUser = normalizePubkeyHex(pubkey);
     state.authMode = authMode;
     state.followPublishPending = false;
     state.streamLikePublishPending = false;
@@ -6828,6 +8893,13 @@
     }
     window.closeLogin();
     subscribeProfiles([pubkey]);
+
+    if (previousUser && nextUser && previousUser !== nextUser) {
+      clearDmState({ keepLastRead: false });
+    }
+    if (isMessagesPageVisible()) {
+      renderMessagesPage({ subscribe: true });
+    }
   }
 
   async function loginWithExtension() {
@@ -6930,9 +9002,9 @@
 
     // Reset reveal/copy buttons
     const revealBtn = qs('#onbRevealBtn');
-    if (revealBtn) revealBtn.textContent = '👁 Reveal';
+    if (revealBtn) revealBtn.textContent = 'ðŸ‘ Reveal';
     const copyBtn = qs('#onbCopyBtn');
-    if (copyBtn) { copyBtn.textContent = '📋 Copy'; copyBtn.classList.remove('copied'); }
+    if (copyBtn) { copyBtn.textContent = 'ðŸ“‹ Copy'; copyBtn.classList.remove('copied'); }
 
     // Reset checkbox + continue button
     const check = qs('#onbSavedCheck');
@@ -6992,7 +9064,7 @@
     const btn = qs('#onbRevealBtn');
     if (!el) return;
     const revealed = el.classList.toggle('revealed');
-    if (btn) btn.textContent = revealed ? '🙈 Hide' : '👁 Reveal';
+    if (btn) btn.textContent = revealed ? 'ðŸ™ˆ Hide' : 'ðŸ‘ Reveal';
   }
 
   // Called from HTML: copy nsec to clipboard
@@ -7003,15 +9075,15 @@
       await navigator.clipboard.writeText(value);
       const btn = qs('#onbCopyBtn');
       if (btn) {
-        btn.textContent = '✓ Copied!';
+        btn.textContent = 'âœ“ Copied!';
         btn.classList.add('copied');
-        setTimeout(() => { btn.textContent = '📋 Copy'; btn.classList.remove('copied'); }, 2000);
+        setTimeout(() => { btn.textContent = 'ðŸ“‹ Copy'; btn.classList.remove('copied'); }, 2000);
       }
       // Also reveal so user can verify what was copied
       const el = qs('#onbNsecValue');
       if (el) { el.classList.add('revealed'); }
       const revBtn = qs('#onbRevealBtn');
-      if (revBtn) revBtn.textContent = '🙈 Hide';
+      if (revBtn) revBtn.textContent = 'ðŸ™ˆ Hide';
     } catch (_) {
       alert('Clipboard blocked. Please manually select and copy the key.');
     }
@@ -7085,7 +9157,7 @@
       applySettings(nextSettings, { reconnect: false });
       closeOnboarding();
     } catch (err) {
-      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '✓ Save & Enter Sifaka Live'; }
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'âœ“ Save & Enter Sifaka Live'; }
       alert(err.message || 'Failed to publish profile. Please try again.');
     }
   }
@@ -7349,7 +9421,7 @@
     const ownPubkey = normalizePubkeyHex(state.user.pubkey);
     if (!ownPubkey) { state.streamLikePublishPending = false; return; }
     const alreadyLiked = state.likedStreamAddresses.has(stream.address);
-    const likeMeta = { key: '+', label: '❤', imageUrl: '', shortcode: '' };
+    const likeMeta = { key: '+', label: 'â¤', imageUrl: '', shortcode: '' };
 
     try {
       if (alreadyLiked) {
@@ -7474,6 +9546,14 @@
       window.showPage('communities');
     };
 
+    window.showMessages = function () {
+      window.showPage('messages');
+    };
+
+    window.openMessagesWithPeer = function (peerToken) {
+      openMessagesWithPeer(peerToken, { routeMode: 'push' }).catch(() => {});
+    };
+
     /* ---- Master audio/playback stop ----
        Call with which player to KEEP playing ('hero' | 'theater' | 'profile' | null).
        All other active players are paused and their HLS instances destroyed.       */
@@ -7525,14 +9605,17 @@
       const video = qs('#videoPage');
       const profile = qs('#profilePage');
       const communities = qs('#communitiesPage');
+      const messages = qs('#messagesPage');
       const faq = qs('#faqPage');
       if (p !== 'video') setActiveViewerAddress('');
       if (p === 'home' && routeMode !== 'skip') syncHomeRoute(routeMode);
       if (p === 'faq' && routeMode !== 'skip') syncFaqRoute(routeMode);
+      if (p === 'messages' && routeMode !== 'skip') syncMessagesRoute(routeMode);
       if (home) home.classList.toggle('active', p === 'home');
       if (video) video.style.display = 'none';
       if (profile) profile.style.display = 'none';
       if (communities) communities.style.display = p === 'communities' ? 'block' : 'none';
+      if (messages) messages.style.display = p === 'messages' ? 'block' : 'none';
       if (faq) faq.style.display = p === 'faq' ? 'block' : 'none';
       // Communities/home router behavior:
       // - home keeps hero playback and cycling
@@ -7550,6 +9633,11 @@
         // Communities view is mounted lazily so existing Sifaka Live startup stays fast.
         window.SifakaCommunities.mount();
       }
+      if (p === 'messages') {
+        renderMessagesPage({ subscribe: true });
+      } else {
+        teardownDmSubscription();
+      }
       if (state.settings.miniPlayer && state.selectedStreamAddress) window.showMini();
       else window.hideMini();
       window.scrollTo(0, 0);
@@ -7561,6 +9649,7 @@
       const video = qs('#videoPage');
       const profile = qs('#profilePage');
       const communities = qs('#communitiesPage');
+      const messages = qs('#messagesPage');
       const faq = qs('#faqPage');
       const selected = state.selectedStreamAddress && state.streamsByAddress.get(state.selectedStreamAddress);
       setActiveViewerAddress(selected ? selected.address : '');
@@ -7569,7 +9658,9 @@
       if (video) video.style.display = 'block';
       if (profile) profile.style.display = 'none';
       if (communities) communities.style.display = 'none';
+      if (messages) messages.style.display = 'none';
       if (faq) faq.style.display = 'none';
+      teardownDmSubscription();
       // Kill the hero cycle timer completely ? prevents it firing and starting audio behind theater
       stopHeroCycle();
       stopAllAudio('theater');
@@ -7585,13 +9676,16 @@
       const video = qs('#videoPage');
       const profile = qs('#profilePage');
       const communities = qs('#communitiesPage');
+      const messages = qs('#messagesPage');
       const faq = qs('#faqPage');
       setActiveViewerAddress('');
       if (home) home.classList.remove('active');
       if (video) video.style.display = 'none';
       if (profile) profile.style.display = 'block';
       if (communities) communities.style.display = 'none';
+      if (messages) messages.style.display = 'none';
       if (faq) faq.style.display = 'none';
+      teardownDmSubscription();
       // Kill the hero cycle timer completely ? prevents audio starting behind profile
       stopHeroCycle();
       stopAllAudio('profile');
@@ -7761,12 +9855,19 @@
     };
 
     window.openProfileMessage = function () {
-      const btn = qs('#profileMessageBtn');
-      if (btn) {
-        const original = btn.textContent;
-        btn.textContent = 'Soon';
-        setTimeout(() => { btn.textContent = original; }, 1200);
+      const peer = normalizePubkeyHex(state.selectedProfilePubkey);
+      if (!peer) return;
+      if (!state.user) {
+        window.openLogin();
+        return;
       }
+      if (normalizePubkeyHex(state.user.pubkey) === peer) {
+        setDmStatus('You cannot message your own account.', 'error');
+        return;
+      }
+      openMessagesWithPeer(peer, { routeMode: 'push' }).catch((err) => {
+        setDmStatus(err && err.message ? err.message : 'Could not open DM conversation.', 'error');
+      });
     };
 
     window.openProfileEditSettings = function () {
@@ -7835,7 +9936,7 @@
         btn.className = 'atl-item';
         const inList = !!(pubkey && list.pubkeys.includes(pubkey));
         if (inList) {
-          btn.textContent = '✓ ' + (list.name || 'Unnamed List');
+          btn.textContent = 'âœ“ ' + (list.name || 'Unnamed List');
           btn.classList.add('atl-saved');
           btn.title = 'Click to remove from this list';
         } else {
@@ -8254,7 +10355,7 @@
     };
 
     window.toggleProfilePostLike = async function (noteId, notePubkey, profilePubkey) {
-      await togglePostReactionByMeta(noteId, notePubkey, profilePubkey, { key: '+', label: '❤', imageUrl: '', shortcode: '' });
+      await togglePostReactionByMeta(noteId, notePubkey, profilePubkey, { key: '+', label: 'â¤', imageUrl: '', shortcode: '' });
     };
 
     window.toggleProfilePostBoost = async function (noteId, notePubkey, profilePubkey) {
@@ -8641,7 +10742,7 @@
           await window.webln.enable();
           const zapAmountMsats = 21000;
           const zapTags = [['relays', ...state.relays], ['amount', String(zapAmountMsats)], ['p', stream.pubkey], ['e', stream.id]];
-          const zapRequest = await signAndPublish(9734, '⚡ zapping from Sifaka Live', zapTags);
+          const zapRequest = await signAndPublish(9734, 'âš¡ zapping from Sifaka Live', zapTags);
           const [user, domain] = lud16.split('@');
           const meta = await fetch(`https://${domain}/.well-known/lnurlp/${user}`).then((r) => r.json());
           if (!meta.callback) throw new Error('Invalid LNURL response.');
@@ -8649,7 +10750,7 @@
           if (!invoiceData.pr) throw new Error('No payment request returned.');
           await window.webln.sendPayment(invoiceData.pr);
           const zapBtn = qs('#theaterZapBtn');
-          if (zapBtn) { const o = zapBtn.innerHTML; zapBtn.textContent = '⚡ Zapped!'; setTimeout(() => { zapBtn.innerHTML = o; }, 2000); }
+          if (zapBtn) { const o = zapBtn.innerHTML; zapBtn.textContent = 'âš¡ Zapped!'; setTimeout(() => { zapBtn.innerHTML = o; }, 2000); }
           return;
         } catch (err) { console.warn('WebLN zap failed:', err.message); }
       }
@@ -8886,6 +10987,30 @@
       state.chatOwnLikeEventByMessageId = new Map();
       state.chatMessageEventsById = new Map();
       state.chatLikePublishPendingByMessageId = new Set();
+      if (state._chatProfileFetchTimer) { clearTimeout(state._chatProfileFetchTimer); state._chatProfileFetchTimer = null; }
+      if (state._chatProfileEoseTimer) { clearTimeout(state._chatProfileEoseTimer); state._chatProfileEoseTimer = null; }
+      if (state._chatProfileSubId && state.pool) {
+        try { state.pool.unsubscribe(state._chatProfileSubId); } catch (_) {}
+      }
+      state._chatProfileSubId = null;
+      if (state.profileStatsSubId && state.pool) {
+        try { state.pool.unsubscribe(state.profileStatsSubId); } catch (_) {}
+      }
+      state.profileStatsSubId = null;
+      state.profileStatsTargetPubkey = '';
+      state.profileStatsByPubkey = new Map();
+      teardownDmSubscription();
+      state.dmOwnerPubkey = '';
+      state.dmMessagesByPeer = new Map();
+      state.dmEventIds = new Set();
+      state.dmDecryptPendingIds = new Set();
+      state.dmLastReadByPeer = new Map();
+      state.dmActivePeerPubkey = '';
+      state.dmSearchTerm = '';
+      state.dmDraftByPeer = new Map();
+      state.dmSendPending = false;
+      state.dmStatus = '';
+      state.dmStatusMode = 'info';
       state.postReactionPublishPendingByNoteAndKey = new Set();
       state.postBoostPublishPendingByNoteId = new Set();
       state.reactionPickerTarget = null;
@@ -9060,6 +11185,12 @@
 
   document.addEventListener('DOMContentLoaded', init);
 })();
+
+
+
+
+
+
 
 
 

@@ -1,4 +1,4 @@
-import { PERMISSIONS, buildPermissionMatrix } from './permissions.js';
+﻿import { PERMISSIONS, buildPermissionMatrix } from './permissions.js';
 
 function esc(value) {
   return String(value == null ? '' : value)
@@ -19,6 +19,13 @@ function initials(name) {
   const value = String(name || '?').trim();
   if (!value) return '?';
   return value.slice(0, 2).toUpperCase();
+}
+
+function shortPubkey(pubkey, left = 12, right = 8) {
+  const value = String(pubkey || '').trim();
+  if (!value) return '';
+  if (value.length <= (left + right + 3)) return value;
+  return `${value.slice(0, left)}...${value.slice(-right)}`;
 }
 
 function groupedChannels(channels) {
@@ -75,8 +82,80 @@ export function createCommunitiesUI(input) {
     statusMsg: '',
     discoveryLimit: 18,
     discoveryChunk: 18,
-    discoveryObserver: null
+    discoveryObserver: null,
+    createDraft: null
   };
+
+  function defaultCreateCommunityDraft(state) {
+    const relayValue = (state && state.relayStatusByUrl)
+      ? Array.from(state.relayStatusByUrl.keys()).join(', ')
+      : '';
+
+    return {
+      type: 'public',
+      name: '',
+      slug: '',
+      defaultChannelName: 'general',
+      description: '',
+      image: '',
+      banner: '',
+      moderators: '',
+      admins: '',
+      topics: '',
+      joinMode: 'open',
+      postingPolicy: 'members',
+      rules: '',
+      allowedRelays: relayValue,
+      discoverable: true,
+      includeAnnouncements: true,
+      includeForum: true,
+      includeStaff: true
+    };
+  }
+
+  function ensureCreateCommunityDraft(state) {
+    if (!ui.createDraft) {
+      ui.createDraft = defaultCreateCommunityDraft(state);
+      return ui.createDraft;
+    }
+
+    if (!ui.createDraft.allowedRelays) {
+      const relayValue = (state && state.relayStatusByUrl)
+        ? Array.from(state.relayStatusByUrl.keys()).join(', ')
+        : '';
+      if (relayValue) ui.createDraft.allowedRelays = relayValue;
+    }
+
+    return ui.createDraft;
+  }
+
+  function captureCreateCommunityDraft() {
+    if (ui.openModal !== 'createCommunity') return;
+
+    const nameField = root.querySelector('#scCreateName');
+    if (!nameField) return;
+
+    ui.createDraft = {
+      type: (root.querySelector('#scCreateType') || {}).value || 'public',
+      name: nameField.value || '',
+      slug: (root.querySelector('#scCreateSlug') || {}).value || '',
+      defaultChannelName: (root.querySelector('#scCreateDefaultChannel') || {}).value || 'general',
+      description: (root.querySelector('#scCreateDescription') || {}).value || '',
+      image: (root.querySelector('#scCreateImage') || {}).value || '',
+      banner: (root.querySelector('#scCreateBanner') || {}).value || '',
+      moderators: (root.querySelector('#scCreateModerators') || {}).value || '',
+      admins: (root.querySelector('#scCreateAdmins') || {}).value || '',
+      topics: (root.querySelector('#scCreateTopics') || {}).value || '',
+      joinMode: (root.querySelector('#scCreateJoinMode') || {}).value || 'open',
+      postingPolicy: (root.querySelector('#scCreatePostingPolicy') || {}).value || 'members',
+      rules: (root.querySelector('#scCreateRules') || {}).value || '',
+      allowedRelays: (root.querySelector('#scCreateAllowedRelays') || {}).value || '',
+      discoverable: !!((root.querySelector('#scCreateDiscoverable') || {}).checked),
+      includeAnnouncements: !!((root.querySelector('#scCreateIncludeAnnouncements') || {}).checked),
+      includeForum: !!((root.querySelector('#scCreateIncludeForum') || {}).checked),
+      includeStaff: !!((root.querySelector('#scCreateIncludeStaff') || {}).checked)
+    };
+  }
 
   function closeTransient() {
     ui.selectedMember = '';
@@ -150,6 +229,7 @@ export function createCommunitiesUI(input) {
   }
 
   function render() {
+    try {
     if (!ui.session.isAuthenticated) {
       renderLoginGate();
       return;
@@ -159,14 +239,25 @@ export function createCommunitiesUI(input) {
     const community = store.getCommunity();
     const channel = store.getChannel();
     const joinedCommunityIds = new Set(state.joinedCommunityIds);
-
+    const lastActiveByCommunity = state.lastActiveByCommunity instanceof Map
+      ? state.lastActiveByCommunity
+      : new Map(Object.entries(state.lastActiveByCommunity || {}));
+    const draftsByChannel = state.draftsByChannel instanceof Map
+      ? state.draftsByChannel
+      : new Map(Object.entries(state.draftsByChannel || {}));
+    const unreadByChannel = state.unreadByChannel instanceof Map
+      ? state.unreadByChannel
+      : new Map(Object.entries(state.unreadByChannel || {}));
+    const relayStatusByUrl = state.relayStatusByUrl instanceof Map
+      ? state.relayStatusByUrl
+      : new Map(Object.entries(state.relayStatusByUrl || {}));
     const communities = state.data.communities || [];
     const publicCommunities = communities
       .filter((entry) => entry.type !== 'private' && entry.discoverable !== false)
       .slice()
       .sort((a, b) => {
-        const aLast = Number(state.lastActiveByCommunity.get(a.id) || 0);
-        const bLast = Number(state.lastActiveByCommunity.get(b.id) || 0);
+        const aLast = Number(lastActiveByCommunity.get(a.id) || 0);
+        const bLast = Number(lastActiveByCommunity.get(b.id) || 0);
         if (aLast !== bLast) return bLast - aLast;
         return String(a.title || '').localeCompare(String(b.title || ''));
       });
@@ -174,14 +265,28 @@ export function createCommunitiesUI(input) {
     const channels = community ? store.getChannels(community.id) : [];
     const messages = channel ? store.filteredMessages(channel.id) : [];
     const pins = channel ? store.getPinnedMessages(channel.id) : [];
-    const draft = channel ? (state.draftsByChannel.get(channel.id) || '') : '';
+    const draft = channel ? (draftsByChannel.get(channel.id) || '') : '';
     const profiles = store.getProfiles();
     const members = community ? (state.data.membersByCommunity[community.id] || []) : [];
 
-    const relayStatuses = Array.from(state.relayStatusByUrl.values());
+    const relayStatuses = Array.from(relayStatusByUrl.values());
     const connectedRelays = relayStatuses.filter((value) => value === 'open').length;
 
     const railCommunities = communities.filter((entry) => joinedCommunityIds.has(entry.id));
+    const hasJoinedCommunities = railCommunities.length > 0;
+    const hasActiveCommunity = !!(community && joinedCommunityIds.has(community.id));
+
+    const currentProfile = state.currentUserPubkey
+      ? (profiles[state.currentUserPubkey] || store.profile(state.currentUserPubkey))
+      : null;
+    const profileName = currentProfile
+      ? (currentProfile.displayName || currentProfile.name || shortPubkey(state.currentUserPubkey))
+      : shortPubkey(state.currentUserPubkey);
+    const profileNip05 = currentProfile && currentProfile.nip05
+      ? `${currentProfile.nip05}${currentProfile.verifiedNip05 ? '' : ' (unverified)'}`
+      : 'No NIP-05 set';
+    const profilePubkey = shortPubkey(state.currentUserPubkey, 14, 10) || 'Unavailable';
+
     const railHtml = railCommunities.map((entry) => {
       const active = community && entry.id === community.id;
       return `
@@ -195,7 +300,7 @@ export function createCommunitiesUI(input) {
       <section class="sc-category">
         <header>${esc(category)}</header>
         ${items.map((entry) => {
-          const unread = Number(state.unreadByChannel.get(entry.id) || 0);
+          const unread = Number(unreadByChannel.get(entry.id) || 0);
           const locked = entry.privacyLevel !== 'public';
           return `
             <button class="sc-channel-btn${channel && entry.id === channel.id ? ' active' : ''}" data-channel="${esc(entry.id)}" title="${esc(entry.topic || '')}">
@@ -253,97 +358,102 @@ export function createCommunitiesUI(input) {
       `;
     }).join('');
 
-    const suggestionsHtml = suggestions.map((entry) => `
-      <button class="sc-discovery-item" data-discovery-community="${esc(entry.id)}">
-        <strong>${esc(entry.title)}</strong>
-        <small>${esc(entry.description || '')}</small>
-      </button>
-    `).join('');
-
-    const showSuggestionPanel = !joinedCommunityIds.size;
     const notificationUnread = (state.data.notifications || []).filter((n) => n.unread).length;
 
     root.innerHTML = `
-      <div class="sc-wrap" id="scWrap">
+      <div class="sc-wrap${hasJoinedCommunities ? '' : ' sc-wrap-empty'}" id="scWrap">
         <aside class="sc-server-rail">
           <div class="sc-rail-top">SC</div>
           <button class="sc-server-add sc-server-add-primary" id="scCreateCommunityBtn" title="Create or join communities">+</button>
-          <div class="sc-server-list">${railHtml || '<div class="sc-server-empty">No communities yet</div>'}</div>
+          <div class="sc-server-list">${railHtml || '<div class="sc-server-empty">Create or Join</div>'}</div>
         </aside>
 
-        <aside class="sc-channel-col">
-          <header class="sc-channel-head">
-            <div>
-              <h2>${esc(community ? community.title : 'Communities')}</h2>
-              <p>${community ? esc(community.type === 'private' ? 'Private Group / NIP-29' : 'Public Community / NIP-72') : 'No active community selected'}</p>
-              <p>${connectedRelays} relay${connectedRelays === 1 ? '' : 's'} connected</p>
+        <aside class="sc-channel-col${hasJoinedCommunities ? '' : ' sc-channel-col-empty'}">
+          ${hasJoinedCommunities ? `
+            <header class="sc-channel-head">
+              <div>
+                <h2>${esc(community ? community.title : 'Communities')}</h2>
+                <p>${community ? esc(community.type === 'private' ? 'Private Group / NIP-29' : 'Public Community / NIP-72') : 'No active community selected'}</p>
+                <p>${connectedRelays} relay${connectedRelays === 1 ? '' : 's'} connected</p>
+              </div>
+              <button id="scServerSettingsBtn" ${community ? '' : 'disabled'}>Settings</button>
+            </header>
+
+            <div class="sc-channel-search">
+              <input id="scSearchInput" value="${esc(state.searchTerm)}" placeholder="Search messages or channels" />
             </div>
-            <button id="scServerSettingsBtn" ${community ? '' : 'disabled'}>Settings</button>
-          </header>
 
-          <div class="sc-channel-search">
-            <input id="scSearchInput" value="${esc(state.searchTerm)}" placeholder="Search messages or channels" />
-          </div>
+            <div class="sc-channel-list">${community ? (channelHtml || '<div class="sc-empty">No channels yet.</div>') : '<div class="sc-empty">Select a community.</div>'}</div>
 
-          <div class="sc-channel-list">${community ? (channelHtml || '<div class="sc-empty">No channels yet.</div>') : '<div class="sc-empty">Select a community.</div>'}</div>
-
-          <footer class="sc-channel-footer">
-            <button id="scInviteBtn" ${community ? '' : 'disabled'}>Invite</button>
-            <button id="scJoinLeaveBtn" ${community ? '' : 'disabled'}>${community && joinedCommunityIds.has(community.id) ? 'Leave' : 'Join'}</button>
-            <button id="scCreateChannelBtn" ${(community && joinedCommunityIds.has(community.id) && store.can('manage_channels', channel, community)) ? '' : 'disabled'}>New Channel</button>
-          </footer>
+            <footer class="sc-channel-footer">
+              <button id="scInviteBtn" ${community ? '' : 'disabled'}>Invite</button>
+              <button id="scJoinLeaveBtn" ${community ? '' : 'disabled'}>${community && joinedCommunityIds.has(community.id) ? 'Leave' : 'Join'}</button>
+              <button id="scCreateChannelBtn" ${(community && joinedCommunityIds.has(community.id) && store.can('manage_channels', channel, community)) ? '' : 'disabled'}>New Channel</button>
+            </footer>
+          ` : `
+            <div class="sc-no-community-panel">
+              <h2>No Communities Yet</h2>
+              <p>If you are not in any communities, only Create and Join options appear.</p>
+              <div class="sc-empty-profile-card">
+                <strong>${esc(profileName || 'Nostr User')}</strong>
+                <small>${esc(profileNip05)}</small>
+                <small>${esc(profilePubkey)}</small>
+              </div>
+              <div class="sc-no-community-help">Use the + button to create a community or join one.</div>
+            </div>
+          `}
         </aside>
 
         <main class="sc-main">
           <header class="sc-main-head">
             <div>
-              <h3>${channel ? `# ${esc(channel.name)}` : (showSuggestionPanel ? 'Find communities' : 'No channel selected')}</h3>
-              <p>${channel ? esc(channel.topic || '') : (showSuggestionPanel ? 'Join a public community or create your own.' : 'Choose a channel to start chatting.')}</p>
+              <h3>${hasJoinedCommunities ? (channel ? `# ${esc(channel.name)}` : 'No channel selected') : 'Create or Join a Community'}</h3>
+              <p>${hasJoinedCommunities ? (channel ? esc(channel.topic || '') : 'Choose a channel to start chatting.') : 'You are not in any communities yet.'}</p>
             </div>
             <div class="sc-main-actions">
-              <button id="scPinnedBtn" ${channel ? '' : 'disabled'}>Pinned (${pins.length})</button>
-              <button id="scChannelSettingsBtn" ${(channel && store.can('manage_channels', channel, community)) ? '' : 'disabled'}>Channel Settings</button>
-              <button id="scNotifBtn">Notifications${notificationUnread ? ` (${notificationUnread})` : ''}</button>
+              ${hasJoinedCommunities
+                ? `<button id="scPinnedBtn" ${channel ? '' : 'disabled'}>Pinned (${pins.length})</button>
+                   <button id="scChannelSettingsBtn" ${(channel && store.can('manage_channels', channel, community)) ? '' : 'disabled'}>Channel Settings</button>
+                   <button id="scNotifBtn">Notifications${notificationUnread ? ` (${notificationUnread})` : ''}</button>`
+                : `<button id="scOpenCommunityHubBtn">Create or Join</button>
+                   <button id="scOpenJoinModalBtn">Browse Public Communities</button>`}
             </div>
           </header>
 
-          ${showSuggestionPanel ? `
-            <section class="sc-feed">
-              <div class="sc-empty">
-                <strong>You are not in any communities yet.</strong>
-                <div style="margin-top:.5rem">Use the + button on the left to create a server or join a public community.</div>
-                <div class="sc-discovery-list" style="margin-top:.7rem">${suggestionsHtml || '<div class="sc-empty">No suggestions yet. Open Join Communities.</div>'}</div>
-                <div style="margin-top:.7rem;display:flex;gap:.4rem;flex-wrap:wrap;">
-                  <button id="scOpenCommunityHubBtn">Create or Join</button>
-                  <button id="scOpenJoinModalBtn">Browse Public Communities</button>
-                </div>
-              </div>
-            </section>
-          ` : `<section class="sc-feed" id="scFeed">${messageHtml || '<div class="sc-empty">No messages yet.</div>'}</section>`}
+          ${hasJoinedCommunities
+            ? `<section class="sc-feed" id="scFeed">${messageHtml || '<div class="sc-empty">No messages yet.</div>'}</section>
 
-          <section class="sc-composer">
-            <div class="sc-draft-tools">
-              <button id="scEmojiBtn">Emoji</button>
-              <label class="sc-attach-label">Attach<input type="file" id="scAttachInput" multiple hidden></label>
-              <button id="scDmHintBtn">Encrypted DM</button>
-            </div>
-            ${(ui.composerAttachments || []).length ? `<div class="sc-attachment-preview">${ui.composerAttachments.map((file) => `<span>${esc(file.name)}</span>`).join('')}</div>` : ''}
-            <textarea id="scComposer" placeholder="${channel ? `Message #${esc(channel.name)}` : 'Select a channel'}" ${channel ? '' : 'disabled'}>${esc(draft)}</textarea>
-            <div class="sc-compose-foot">
-              <small>${channel ? (store.can('post_messages', channel, community) ? 'Ready to publish via Nostr relays' : 'You do not have permission to post in this channel') : 'Pick a channel to start typing'}</small>
-              <button id="scSendBtn" ${(channel && store.can('post_messages', channel, community)) ? '' : 'disabled'}>Send</button>
-            </div>
-            ${ui.emojiOpen ? `<div class="sc-emoji-pop" id="scEmojiPop">${[':)', ':D', '<3', ':fire:', ':zap:', ':rocket:', ':sifaka:'].map((emoji) => `<button data-emoji="${esc(emoji)}">${esc(emoji)}</button>`).join('')}</div>` : ''}
-          </section>
+               <section class="sc-composer">
+                 <div class="sc-draft-tools">
+                   <button id="scEmojiBtn">Emoji</button>
+                   <label class="sc-attach-label">Attach<input type="file" id="scAttachInput" multiple hidden></label>
+                   <button id="scDmHintBtn">Encrypted DM</button>
+                 </div>
+                 ${(ui.composerAttachments || []).length ? `<div class="sc-attachment-preview">${ui.composerAttachments.map((file) => `<span>${esc(file.name)}</span>`).join('')}</div>` : ''}
+                 <textarea id="scComposer" placeholder="${channel ? `Message #${esc(channel.name)}` : 'Select a channel'}" ${channel ? '' : 'disabled'}>${esc(draft)}</textarea>
+                 <div class="sc-compose-foot">
+                   <small>${channel ? (store.can('post_messages', channel, community) ? 'Ready to publish via Nostr relays' : 'You do not have permission to post in this channel') : 'Pick a channel to start typing'}</small>
+                   <button id="scSendBtn" ${(channel && store.can('post_messages', channel, community)) ? '' : 'disabled'}>Send</button>
+                 </div>
+                 ${ui.emojiOpen ? `<div class="sc-emoji-pop" id="scEmojiPop">${[':)', ':D', '<3', ':fire:', ':zap:', ':rocket:', ':sifaka:'].map((emoji) => `<button data-emoji="${esc(emoji)}">${esc(emoji)}</button>`).join('')}</div>` : ''}
+               </section>`
+            : `<section class="sc-feed">
+                 <div class="sc-empty sc-empty-onboard">
+                   <strong>You are not in any communities yet.</strong>
+                   <div style="margin-top:.5rem">Click Create or Join to get started.</div>
+                 </div>
+               </section>`}
         </main>
 
-        <aside class="sc-member-col${ui.memberPanelOpen ? '' : ' collapsed'}">
-          <header>
-            <h4>Members (${members.length})</h4>
-            <button id="scToggleMembersBtn">${ui.memberPanelOpen ? 'Hide' : 'Show'}</button>
-          </header>
-          <div class="sc-member-list">${memberHtml}</div>
-        </aside>
+        ${hasActiveCommunity ? `
+          <aside class="sc-member-col${ui.memberPanelOpen ? '' : ' collapsed'}">
+            <header>
+              <h4>Members (${members.length})</h4>
+              <button id="scToggleMembersBtn">${ui.memberPanelOpen ? 'Hide' : 'Show'}</button>
+            </header>
+            <div class="sc-member-list">${memberHtml}</div>
+          </aside>
+        ` : ''}
 
         ${ui.statusMsg ? `<div class="sc-toast">${esc(ui.statusMsg)}</div>` : ''}
         ${ui.selectedMember ? renderProfilePopout(ui.selectedMember, profiles, members, community, store) : ''}
@@ -353,9 +463,12 @@ export function createCommunitiesUI(input) {
     `;
 
     bindHandlers();
+    } catch (err) {
+      console.error('Sifaka Communities render error', err);
+      root.innerHTML = '<section class="sc-auth-gate"><div class="sc-auth-card"><h2>Communities Temporarily Unavailable</h2><p>Reload this page to try again.</p></div></section>';
+    }
   }
-
-  function renderProfilePopout(pubkey, profiles, members, community, storeRef) {
+function renderProfilePopout(pubkey, profiles, members, community, storeRef) {
     const profile = profiles[pubkey] || storeRef.profile(pubkey);
     const member = (members || []).find((entry) => entry.pubkey === pubkey) || { roles: ['guest'] };
 
@@ -385,56 +498,61 @@ export function createCommunitiesUI(input) {
   }
 
   function renderCreateCommunityModal(state) {
-    const relayValue = (state.relayStatusByUrl && Array.from(state.relayStatusByUrl.keys()).join(', ')) || '';
+    const draft = ensureCreateCommunityDraft(state);
+    const ownerProfile = state.currentUserPubkey ? store.profile(state.currentUserPubkey) : null;
+    const ownerName = ownerProfile ? (ownerProfile.displayName || ownerProfile.name || shortPubkey(state.currentUserPubkey)) : shortPubkey(state.currentUserPubkey);
+    const ownerNip05 = ownerProfile && ownerProfile.nip05 ? `${ownerProfile.nip05}${ownerProfile.verifiedNip05 ? '' : ' (unverified)'}` : 'No NIP-05 set';
+
     return `
       <div class="sc-modal-ov" data-close="modal">
         <div class="sc-modal sc-modal-wide">
           <h4>Create Community</h4>
           <p>Build a Nostr-native server with membership, moderation, and posting rules.</p>
+          <div class="sc-create-owner">Owner: <strong>${esc(ownerName || 'Nostr User')}</strong><small>${esc(ownerNip05)} | ${esc(shortPubkey(state.currentUserPubkey, 12, 10))}</small></div>
           <div class="sc-form-grid sc-form-grid-2">
             <label>Type
               <select id="scCreateType">
-                <option value="public">Public Community (NIP-72 style)</option>
-                <option value="private">Private Group (NIP-29 style)</option>
+                <option value="public" ${draft.type === 'public' ? 'selected' : ''}>Public Community (NIP-72 style)</option>
+                <option value="private" ${draft.type === 'private' ? 'selected' : ''}>Private Group (NIP-29 style)</option>
               </select>
             </label>
-            <label>Name<input id="scCreateName" placeholder="Sifaka Builders"></label>
-            <label>Slug / ID<input id="scCreateSlug" placeholder="sifaka-builders"></label>
-            <label>Default Channel Name<input id="scCreateDefaultChannel" value="general"></label>
-            <label class="full">Description<textarea id="scCreateDescription" placeholder="What is this community about?"></textarea></label>
-            <label>Image URL<input id="scCreateImage" placeholder="https://.../group.jpg"></label>
-            <label>Banner URL<input id="scCreateBanner" placeholder="https://.../banner.jpg"></label>
-            <label>Moderators (comma pubkeys)<input id="scCreateModerators" placeholder="npub/hex pubkeys separated by commas"></label>
-            <label>Admins (comma pubkeys)<input id="scCreateAdmins" placeholder="npub/hex pubkeys separated by commas"></label>
+            <label>Name<input id="scCreateName" value="${esc(draft.name)}" placeholder="Sifaka Builders"></label>
+            <label>Slug / ID<input id="scCreateSlug" value="${esc(draft.slug)}" placeholder="sifaka-builders"></label>
+            <label>Default Channel Name<input id="scCreateDefaultChannel" value="${esc(draft.defaultChannelName)}"></label>
+            <label class="full">Description<textarea id="scCreateDescription" placeholder="What is this community about?">${esc(draft.description)}</textarea></label>
+            <label>Image URL<input id="scCreateImage" value="${esc(draft.image)}" placeholder="https://.../group.jpg"></label>
+            <label>Banner URL<input id="scCreateBanner" value="${esc(draft.banner)}" placeholder="https://.../banner.jpg"></label>
+            <label>Moderators (comma pubkeys)<input id="scCreateModerators" value="${esc(draft.moderators)}" placeholder="npub/hex pubkeys separated by commas"></label>
+            <label>Admins (comma pubkeys)<input id="scCreateAdmins" value="${esc(draft.admins)}" placeholder="npub/hex pubkeys separated by commas"></label>
             <label>Topics (comma)
-              <input id="scCreateTopics" placeholder="nostr, livestream, dev">
+              <input id="scCreateTopics" value="${esc(draft.topics)}" placeholder="nostr, livestream, dev">
             </label>
             <label>Membership Mode
               <select id="scCreateJoinMode">
-                <option value="open">Open join</option>
-                <option value="approval">Approval required</option>
-                <option value="invite_only">Invite only</option>
+                <option value="open" ${draft.joinMode === 'open' ? 'selected' : ''}>Open join</option>
+                <option value="approval" ${draft.joinMode === 'approval' ? 'selected' : ''}>Approval required</option>
+                <option value="invite_only" ${draft.joinMode === 'invite_only' ? 'selected' : ''}>Invite only</option>
               </select>
             </label>
             <label>Posting Rules
               <select id="scCreatePostingPolicy">
-                <option value="members">Members can post</option>
-                <option value="moderators">Moderators only</option>
-                <option value="admins">Admins only</option>
+                <option value="members" ${draft.postingPolicy === 'members' ? 'selected' : ''}>Members can post</option>
+                <option value="moderators" ${draft.postingPolicy === 'moderators' ? 'selected' : ''}>Moderators only</option>
+                <option value="admins" ${draft.postingPolicy === 'admins' ? 'selected' : ''}>Admins only</option>
               </select>
             </label>
             <label class="full">Community Rules (one per line)
-              <textarea id="scCreateRules" placeholder="Be respectful\nNo spam\nKeep discussion on-topic"></textarea>
+              <textarea id="scCreateRules" placeholder="Be respectful\nNo spam\nKeep discussion on-topic">${esc(draft.rules)}</textarea>
             </label>
             <label class="full">Allowed Relays (comma)
-              <input id="scCreateAllowedRelays" value="${esc(relayValue)}" placeholder="wss://relay.example.com, wss://relay2.example.com">
+              <input id="scCreateAllowedRelays" value="${esc(draft.allowedRelays)}" placeholder="wss://relay.example.com, wss://relay2.example.com">
             </label>
           </div>
           <div class="sc-check-grid">
-            <label><input type="checkbox" id="scCreateDiscoverable" checked> Public discovery</label>
-            <label><input type="checkbox" id="scCreateIncludeAnnouncements" checked> Include #announcements</label>
-            <label><input type="checkbox" id="scCreateIncludeForum" checked> Include #forum</label>
-            <label><input type="checkbox" id="scCreateIncludeStaff" checked> Include private #staff channel</label>
+            <label><input type="checkbox" id="scCreateDiscoverable" ${draft.discoverable ? 'checked' : ''}> Public discovery</label>
+            <label><input type="checkbox" id="scCreateIncludeAnnouncements" ${draft.includeAnnouncements ? 'checked' : ''}> Include #announcements</label>
+            <label><input type="checkbox" id="scCreateIncludeForum" ${draft.includeForum ? 'checked' : ''}> Include #forum</label>
+            <label><input type="checkbox" id="scCreateIncludeStaff" ${draft.includeStaff ? 'checked' : ''}> Include private #staff channel</label>
           </div>
           <div class="sc-modal-foot">
             <button data-close="modal">Cancel</button>
@@ -444,8 +562,7 @@ export function createCommunitiesUI(input) {
       </div>
     `;
   }
-
-  function renderCommunitySettingsModal(community) {
+function renderCommunitySettingsModal(community) {
     return `
       <div class="sc-modal-ov" data-close="modal">
         <div class="sc-modal sc-modal-wide">
@@ -753,6 +870,7 @@ export function createCommunitiesUI(input) {
   }
 
   function closeModalAndRerender() {
+    if (ui.openModal === 'createCommunity') ui.createDraft = null;
     ui.openModal = '';
     render();
   }
@@ -792,6 +910,7 @@ export function createCommunitiesUI(input) {
     root.querySelectorAll('[data-close="modal"]').forEach((el) => {
       el.addEventListener('click', (event) => {
         if (event.target !== el) return;
+        if (ui.openModal === 'createCommunity') ui.createDraft = null;
         ui.openModal = '';
         render();
       });
@@ -996,7 +1115,7 @@ export function createCommunitiesUI(input) {
     });
 
     const hubCreateBtn = root.querySelector('#scHubCreateBtn');
-    if (hubCreateBtn) hubCreateBtn.addEventListener('click', () => { ui.openModal = 'createCommunity'; render(); });
+    if (hubCreateBtn) hubCreateBtn.addEventListener('click', () => { ui.createDraft = null; ui.openModal = 'createCommunity'; render(); });
 
     const hubJoinBtn = root.querySelector('#scHubJoinBtn');
     if (hubJoinBtn) hubJoinBtn.addEventListener('click', () => {
@@ -1094,25 +1213,28 @@ export function createCommunitiesUI(input) {
         if (ui.createBusy) return;
         ui.createBusy = true;
 
+        captureCreateCommunityDraft();
+        const form = ui.createDraft || defaultCreateCommunityDraft(store.getState());
+
         const payload = {
-          type: (root.querySelector('#scCreateType') || {}).value || 'public',
-          name: (root.querySelector('#scCreateName') || {}).value || '',
-          slug: (root.querySelector('#scCreateSlug') || {}).value || '',
-          defaultChannelName: (root.querySelector('#scCreateDefaultChannel') || {}).value || 'general',
-          description: (root.querySelector('#scCreateDescription') || {}).value || '',
-          image: (root.querySelector('#scCreateImage') || {}).value || '',
-          banner: (root.querySelector('#scCreateBanner') || {}).value || '',
-          moderators: parseCsv((root.querySelector('#scCreateModerators') || {}).value || ''),
-          admins: parseCsv((root.querySelector('#scCreateAdmins') || {}).value || ''),
-          topics: parseCsv((root.querySelector('#scCreateTopics') || {}).value || ''),
-          joinMode: (root.querySelector('#scCreateJoinMode') || {}).value || 'open',
-          postingPolicy: (root.querySelector('#scCreatePostingPolicy') || {}).value || 'members',
-          rules: parseLines((root.querySelector('#scCreateRules') || {}).value || ''),
-          allowedRelays: parseCsv((root.querySelector('#scCreateAllowedRelays') || {}).value || ''),
-          discoverable: !!((root.querySelector('#scCreateDiscoverable') || {}).checked),
-          includeAnnouncements: !!((root.querySelector('#scCreateIncludeAnnouncements') || {}).checked),
-          includeForum: !!((root.querySelector('#scCreateIncludeForum') || {}).checked),
-          includeStaff: !!((root.querySelector('#scCreateIncludeStaff') || {}).checked)
+          type: form.type || 'public',
+          name: form.name || '',
+          slug: form.slug || '',
+          defaultChannelName: form.defaultChannelName || 'general',
+          description: form.description || '',
+          image: form.image || '',
+          banner: form.banner || '',
+          moderators: parseCsv(form.moderators || ''),
+          admins: parseCsv(form.admins || ''),
+          topics: parseCsv(form.topics || ''),
+          joinMode: form.joinMode || 'open',
+          postingPolicy: form.postingPolicy || 'members',
+          rules: parseLines(form.rules || ''),
+          allowedRelays: parseCsv(form.allowedRelays || ''),
+          discoverable: !!form.discoverable,
+          includeAnnouncements: !!form.includeAnnouncements,
+          includeForum: !!form.includeForum,
+          includeStaff: !!form.includeStaff
         };
 
         const created = store.createCommunity(payload);
@@ -1167,6 +1289,7 @@ export function createCommunitiesUI(input) {
         }
 
         ui.createBusy = false;
+        ui.createDraft = null;
         ui.openModal = '';
         setStatus('Community created.');
       });
@@ -1343,7 +1466,10 @@ export function createCommunitiesUI(input) {
     if (mounted) return;
     mounted = true;
     render();
-    dispose = store.subscribe(() => render());
+    dispose = store.subscribe(() => {
+      captureCreateCommunityDraft();
+      render();
+    });
   }
 
   function unmount() {
@@ -1362,4 +1488,21 @@ export function createCommunitiesUI(input) {
     setSession
   };
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
