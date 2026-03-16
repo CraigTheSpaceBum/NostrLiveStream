@@ -24,12 +24,10 @@
     </button>
     <div class="nav-dropdown" id="logoDropdown">
       <button class="dd-item" onclick="showPage('home');closeAllDD()"><span class="ddi">&#128308;</span>Live Now <span class="dd-count">24</span></button>
-      <button class="dd-item" onclick="showCommunities();closeAllDD()"><span class="ddi">&#127970;</span>Communities</button>
       <button class="dd-item" onclick="closeAllDD()"><span class="ddi">&#127909;</span>Videos</button>
       <button class="dd-item" onclick="closeAllDD()"><span class="ddi">&#128225;</span>Nostr Feed</button>
+      <button class="dd-item" onclick="showCommunities();closeAllDD()"><span class="ddi">&#127970;</span>Communities</button>
       <button class="dd-item" onclick="showPage('messages');closeAllDD()"><span class="ddi">&#128172;</span>Messages</button>
-      <button class="dd-item" onclick="closeAllDD()"><span class="ddi">&#128279;</span>Relays</button>
-      <div class="dd-sep"></div>
       <button class="dd-item" onclick="showPage('faq');closeAllDD()"><span class="ddi">&#10067;</span>FAQ & Help</button>
     </div>
   </div>
@@ -1080,8 +1078,8 @@
             </div>
           </div>
           <div class="profile-tab-pane" id="profileTabMedia">
-            <div id="profileVideosList" class="profile-video-grid" style="margin-bottom:.75rem;"></div>
-            <div id="profilePhotosList" class="profile-photo-grid"></div>
+            <div id="profileMediaList" class="profile-media-grid"></div>
+            <div id="profilePhotosList" style="display:none;"></div>
           </div>
         </div>
       </div>

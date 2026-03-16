@@ -1,4 +1,4 @@
-﻿import { PERMISSIONS, buildPermissionMatrix } from './permissions.js';
+import { PERMISSIONS, buildPermissionMatrix } from './permissions.js';
 
 function esc(value) {
   return String(value == null ? '' : value)
@@ -228,6 +228,29 @@ export function createCommunitiesUI(input) {
     }
   }
 
+
+  function enhanceRenderedCommunityContent() {
+    const nodes = root.querySelectorAll('.sc-content[data-raw-content]');
+    if (!nodes || !nodes.length) return;
+
+    nodes.forEach((node) => {
+      const raw = String(node.getAttribute('data-raw-content') || '');
+      if (!raw.trim()) {
+        node.textContent = '';
+        return;
+      }
+
+      if (typeof window !== 'undefined' && typeof window.renderNostrContent === 'function') {
+        try {
+          node.innerHTML = '';
+          node.appendChild(window.renderNostrContent(raw));
+          return;
+        } catch (_) {}
+      }
+
+      node.textContent = raw;
+    });
+  }
   function render() {
     try {
     if (!ui.session.isAuthenticated) {
@@ -343,7 +366,7 @@ export function createCommunitiesUI(input) {
               ${(author.nip05 && author.verifiedNip05) ? `<span class="sc-nip05">${esc(author.nip05)}</span>` : ''}
             </header>
             ${message.replyTo ? `<div class="sc-reply-tag">Replying to ${esc(message.replyTo)}</div>` : ''}
-            <div class="sc-content">${esc(message.content)}</div>
+            <div class="sc-content" data-raw-content="${esc(message.content)}">${esc(message.content)}</div>
             ${(message.attachments || []).length ? `<div class="sc-attachments">${(message.attachments || []).map((attachment) => `<span>${esc(attachment.name)}</span>`).join('')}</div>` : ''}
             <footer>
               <div class="sc-reactions">${reactions}</div>
@@ -462,6 +485,7 @@ export function createCommunitiesUI(input) {
       </div>
     `;
 
+    enhanceRenderedCommunityContent();
     bindHandlers();
     } catch (err) {
       console.error('Sifaka Communities render error', err);
